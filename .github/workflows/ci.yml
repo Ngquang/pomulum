@@ -1,0 +1,69 @@
+name: CI
+
+# The deterministic gate for every change: the contract checks from
+# scripts/check.sh plus a strict typecheck. Node strips types without
+# checking them, so this is the only place a type error can be caught.
+#
+# Recording itself is NOT tested here. It needs a real screen and the macOS
+# Screen Recording grant, which a hosted runner cannot provide. That is what
+# scripts/e2e-pomulum-ts.sh is for: run it by hand, on a real Mac.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check · ${{ matrix.os }} · node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        # engines: >= 22.18 — test the lower bound (the "22" label resolves to
+        # the latest 22.x, which is >= 22.18) and the newest line.
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The unit suite resolves the real toolchain, so ffmpeg must exist.
+      - name: Ensure ffmpeg
+        run: |
+          if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
+            echo "ffmpeg already present"
+            exit 0
+          fi
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install ffmpeg
+          else
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+
+      - name: Deterministic gates
+        run: bash scripts/check.sh
+
+      # No committed dependency: the compiler lives in the runner's temp
+      # directory, and the types target the oldest supported Node line.
+      # --noUnusedLocals/Parameters: a variable that no longer does anything
+      # is a defect the typechecker can find for free.
+      - name: Strict typecheck
+        run: |
+          set -eu
+          TSDIR="$RUNNER_TEMP/tscheck"
+          mkdir -p "$TSDIR"
+          cd "$TSDIR"
+          npm install --silent --no-audit --no-fund typescript@5 @types/node@22
+          "$TSDIR/node_modules/.bin/tsc" --noEmit --strict \
+            --noUnusedLocals --noUnusedParameters \
+            --target es2023 --module nodenext --moduleResolution nodenext \
+            --allowImportingTsExtensions --skipLibCheck \
+            --typeRoots "$TSDIR/node_modules/@types" \
+            "$GITHUB_WORKSPACE/pomulum.ts" "$GITHUB_WORKSPACE/pomulum.test.ts"

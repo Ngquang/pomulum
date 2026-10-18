@@ -1,0 +1,17 @@
+{
+  "name": "pomulum",
+  "version": "0.2.0",
+  "description": "Agent screen recorder CLI for macOS — one file, no dependencies, ffmpeg engine",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "keywords": ["macos", "screen-recording", "screencast", "ffmpeg", "cli", "agent", "ai-agents"],
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "test": "node --test pomulum.test.ts",
+    "check": "bash scripts/check.sh",
+    "e2e": "bash scripts/e2e-pomulum-ts.sh"
+  }
+}
