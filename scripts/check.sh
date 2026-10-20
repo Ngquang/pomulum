@@ -126,7 +126,7 @@ fi
 # D8 — no dangling references. A deleted file must not survive in the docs:
 # removing the logo generator once left README.md pointing at it.
 BROKEN=""
-for f in README.md CHANGELOG.md docs/*.md skills/pomulum/SKILL.md; do
+for f in README.md CHANGELOG.md SECURITY.md CONTRIBUTING.md AGENTS.md docs/*.md skills/pomulum/SKILL.md; do
   [ -f "$f" ] || continue
   d=$(dirname "$f")
   refs=$(grep -oE '\]\([^)#][^)]*\)|src="[^"]+"' "$f" \

@@ -1,11 +1,22 @@
 {
   "name": "pomulum",
-  "version": "0.2.0",
-  "description": "Agent screen recorder CLI for macOS — one file, no dependencies, ffmpeg engine",
+  "version": "0.2.1",
+  "description": "Agent screen recorder CLI for macOS: one file, no dependencies, ffmpeg engine",
   "license": "MIT",
+  "author": "lukeng",
   "type": "module",
   "private": true,
+  "homepage": "https://github.com/Ngquang/pomulum#readme",
+  "bugs": "https://github.com/Ngquang/pomulum/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ngquang/pomulum.git"
+  },
   "keywords": ["macos", "screen-recording", "screencast", "ffmpeg", "cli", "agent", "ai-agents"],
+  "bin": {
+    "pomulum": "./pomulum.ts"
+  },
+  "files": ["pomulum.ts", "LICENSE", "README.md"],
   "engines": {
     "node": ">=22.18.0"
   },

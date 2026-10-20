@@ -34,7 +34,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 // ─────────────────────────── types (erasable-only) ───────────────────────
 
@@ -45,8 +45,16 @@ export type Toolchain = { ffmpeg: string; ffprobe: string };
 
 /** Argument error -> exit 2. */
 export class UsageError extends Error {}
-/** Runtime error (ffmpeg failed, no device found) -> exit 1. */
-export class RunError extends Error {}
+/** Runtime error (ffmpeg failed, no device found) -> exit 1. `details` go
+ *  into the --json error object, so the agent keeps every fact the command
+ *  had: a short capture still names the file it did produce. */
+export class RunError extends Error {
+  readonly details: Record<string, unknown>;
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.details = details;
+  }
+}
 
 // ─────────────────────── toolchain (guardrail #2) ────────────────────────
 // The PATH of an agent shell does not always contain /opt/homebrew/bin.
@@ -284,15 +292,28 @@ export const TCC_REMEDY =
   "macOS attributes the Screen Recording grant (TCC) to the app that RUNS the recording —" +
   " your terminal or agent host (Terminal, iTerm, ZCode, DeepSeek Harness) — never to ffmpeg." +
   " Open System Settings → Privacy & Security → Screen Recording and toggle THAT app OFF and ON." +
+  " Then fully quit and reopen THAT app: a running process re-reads the permission only at launch." +
   " Recent macOS versions drop the grant when a display is connected or disconnected.";
+
+/** The reset-and-regrant sentence for a KNOWN bundle id of the host app.
+ *  `tccutil reset ScreenCapture` without a bundle id wipes the grants of
+ *  every app at once, so the command ships only when the id is known. */
+export function tccutilLine(bundleId: string): string {
+  return (
+    `If the entry still will not stick, run \`tccutil reset ScreenCapture ${bundleId}\`,` +
+    " reopen the app, and grant the permission again."
+  );
+}
 
 /** Detect the signature of a lost Screen Recording permission (TCC): the
  *  capture hangs until the probe is killed (rc = null) or dies at once.
- *  Return a remedy hint, or "" for unrelated errors. */
-export function tccHint(rc: number | null, stderr: string): string {
+ *  Return a remedy hint, or "" for unrelated errors. `hostBundleId` (when
+ *  known) adds the targeted tccutil command. */
+export function tccHint(rc: number | null, stderr: string, hostBundleId?: string): string {
   const looksLikeTcc = rc === null || stderr.includes("not linked into application");
   if (!looksLikeTcc) return "";
-  return `Hint: a capture that hangs or dies at once is usually a lost Screen Recording permission. ${TCC_REMEDY}`;
+  const reset = hostBundleId ? ` ${tccutilLine(hostBundleId)}` : "";
+  return `Hint: a capture that hangs or dies at once is usually a lost Screen Recording permission. ${TCC_REMEDY}${reset}`;
 }
 
 /** Capture one frame from a device to get the real pixel dimensions
@@ -315,7 +336,7 @@ export function probeDeviceDims(t: Toolchain, deviceIndex: number): { w: number;
     if (dims === null) {
       const stderr = (r.stderr ?? "").slice(0, 300);
       throw new RunError(
-        `Cannot get the dimensions of device ${deviceIndex} (rc=${r.status}): ${stderr} ${tccHint(r.status, stderr)}`.trimEnd(),
+        `Cannot get the dimensions of device ${deviceIndex} (rc=${r.status}): ${stderr} ${tccHint(r.status, stderr, findHostAppBundleId())}`.trimEnd(),
       );
     }
     return dims;
@@ -419,6 +440,66 @@ function parsePositiveNumber(flag: string, v: string): number {
   return n;
 }
 
+/** Why `screens` found no screen. avfoundation lists microphones without a
+ *  grant, so a healthy enumeration with zero screens points at the Screen
+ *  Recording gate: the grant is missing, or the host app has not been
+ *  relaunched since it was granted. "no-devices" means the enumeration
+ *  itself came back empty and the cause is elsewhere. */
+export type ScreenPermission = "ok" | "blocked" | "no-devices";
+
+/** Pure: classify the `screens` result. */
+export function resolveScreenPermission(
+  screens: readonly unknown[],
+  mics: readonly unknown[],
+): ScreenPermission {
+  if (screens.length > 0) return "ok";
+  if (mics.length > 0) return "blocked";
+  return "no-devices";
+}
+
+/** Pure: the bundle root of an app-bundle executable path, or null.
+ *  "/Applications/Host.app/Contents/MacOS/Host" → "/Applications/Host.app". */
+export function appBundleRoot(execPath: string): string | null {
+  const m = execPath.match(/^(\/.*)\.app\/Contents\/MacOS\//);
+  return m ? `${m[1]}.app` : null;
+}
+
+/** Walk the parent chain to the app bundle that hosts this process and read
+ *  its bundle id — the TCC "responsible process" that owns the grant. Any
+ *  failure returns undefined, and the remedy hint stays generic. Both
+ *  helpers run by absolute path (no shell). */
+export function findHostAppBundleId(maxHops = 12): string | undefined {
+  try {
+    let pid = process.ppid;
+    for (let i = 0; pid > 1 && i < maxHops; i++) {
+      const ps = spawnSync("/usr/bin/ps", ["-o", "ppid=", "-o", "comm=", "-p", String(pid)], {
+        encoding: "utf8",
+        timeout: 3000,
+      });
+      const line = (ps.stdout ?? "").trim();
+      if (!line) return undefined;
+      const split = line.indexOf(" ");
+      const ppid = Number.parseInt(line.slice(0, split), 10);
+      const comm = line.slice(split + 1).trim();
+      const root = appBundleRoot(comm);
+      if (root !== null) {
+        const pl = spawnSync(
+          "/usr/bin/plutil",
+          ["-extract", "CFBundleIdentifier", "raw", join(root, "Contents", "Info.plist")],
+          { encoding: "utf8", timeout: 3000 },
+        );
+        const id = (pl.stdout ?? "").trim();
+        return id.length > 0 ? id : undefined;
+      }
+      if (!Number.isFinite(ppid) || ppid <= 1) return undefined;
+      pid = ppid;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 /** `screens [--json] [--no-cache]` — list the avfoundation screens and
  *  microphones with their real pixel dimensions (one-frame probe, with a
  *  disk cache). */
@@ -431,6 +512,10 @@ function cmdScreens(argv: string[]): number {
   const t = requireToolchain();
   const t0 = performance.now();
   const { screens, mics } = listDevices(t);
+  const permission = resolveScreenPermission(screens, mics);
+  const hostBundleId = permission === "ok" ? undefined : findHostAppBundleId();
+  const hint =
+    permission === "ok" ? undefined : `${TCC_REMEDY}${hostBundleId ? ` ${tccutilLine(hostBundleId)}` : ""}`;
   const signature = devicesSignature(screens, mics);
   const noCache = a.bools.has("--no-cache");
   const cached = noCache ? null : readCache(signature);
@@ -457,10 +542,18 @@ function cmdScreens(argv: string[]): number {
       ...screens.map((s) => `  [${s.index}] ${s.name} — ${s.width}×${s.height}${fromCache ? " (cache)" : ""}`),
       `Mic:`,
       ...mics.map((m) => `  [${m.index}] ${m.name}`),
+      ...(hint ? ["", `Screen permission: ${permission}.`, `Hint: ${hint}`] : []),
       ``,
       `Use: node pomulum.ts record --screen <index> [--crop x:y:w:h]`,
     ].join("\n"),
-    { screens, mics, cached: fromCache, elapsedMs },
+    {
+      screens,
+      mics,
+      screenPermission: permission,
+      ...(hint ? { hint } : {}),
+      cached: fromCache,
+      elapsedMs,
+    },
   );
   return 0;
 }
@@ -574,7 +667,7 @@ function cmdSnap(argv: string[]): number {
   const dims = r.status === 0 && existsSync(out) ? ffprobeDims(t, out) : null;
   if (dims === null) {
     const stderr = (r.stderr ?? "").slice(0, 300);
-    throw new RunError(`Snap failed (rc=${r.status}): ${stderr} ${tccHint(r.status, stderr)}`.trimEnd());
+    throw new RunError(`Snap failed (rc=${r.status}): ${stderr} ${tccHint(r.status, stderr, findHostAppBundleId())}`.trimEnd());
   }
   const elapsedMs = Math.round(performance.now() - t0);
   emitJsonOr(
@@ -687,6 +780,7 @@ export type RecordingState = {
   device: { index: number; name: string; width: number; height: number };
   crop: Crop | null;
   mic: number | null;
+  capSec: number | null; // the -t limit ffmpeg stops at on its own; null = none
 };
 
 export type RecordState = PendingState | RecordingState;
@@ -706,7 +800,10 @@ export function parsePidfile(raw: string): RecordState {
   };
   if (typeof parsed !== "object" || parsed === null) bad();
   const o = parsed as Record<string, unknown>;
-  const hasBase = typeof o.output === "string" && typeof o.startedAt === "string";
+  const hasBase =
+    typeof o.output === "string" &&
+    typeof o.startedAt === "string" &&
+    Number.isFinite(Date.parse(o.startedAt));
   if (o.state === "pending" && hasBase) {
     return { state: "pending", output: o.output as string, startedAt: o.startedAt as string };
   }
@@ -737,6 +834,7 @@ export function parsePidfile(raw: string): RecordState {
       },
       crop: (o.crop ?? null) as Crop | null,
       mic: typeof o.mic === "number" ? o.mic : null,
+      capSec: typeof o.capSec === "number" && o.capSec > 0 ? o.capSec : null,
     };
   }
   return bad();
@@ -942,6 +1040,52 @@ export function ffprobeVerify(t: Toolchain, file: string): RecordingInfo | null 
   return { width: v.width, height: v.height, durationSeconds, bytes, hasAudio };
 }
 
+// ─────────── capture verdict: did the file get what the agent asked? ──────
+// A readable file is not enough. avfoundation can stop delivering frames and
+// ffmpeg then exits cleanly with a short, valid mp4 (seen live: a 3 s request
+// that produced 0.63 s). The agent must not learn that from a video player.
+
+/** Allowance when the expectation is the `-t` cap: ffmpeg counts output
+ *  time, so a reached cap is exact to a frame. */
+export const SHORTFALL_ALLOWANCE_CAP_SEC = 1.0;
+/** Allowance when the expectation is the wall clock: the spawn, the
+ *  avfoundation warm-up and the SIGINT flush all sit outside the frames. */
+export const SHORTFALL_ALLOWANCE_WALL_SEC = 2.5;
+
+export type CaptureExpectation = { expectedSec: number; allowanceSec: number };
+export type CaptureVerdict = { expectedSec: number; shortfallSec: number; short: boolean };
+
+/** What `stop` expects the file to hold. The cap, when the wall clock shows
+ *  ffmpeg reached it, or when ffmpeg ended on its own before it: nothing but
+ *  a stall or a crash ends a capped capture early, so the request is still
+ *  the measure. Else the wall clock up to the stop request, which is what
+ *  the agent waited (a stop by hand before the cap is not a defect). */
+export function expectedCapture(capSec: number | null, wallSec: number, selfExited: boolean): CaptureExpectation {
+  if (capSec !== null && (wallSec >= capSec || selfExited)) {
+    return { expectedSec: capSec, allowanceSec: SHORTFALL_ALLOWANCE_CAP_SEC };
+  }
+  return { expectedSec: Math.max(0, wallSec), allowanceSec: SHORTFALL_ALLOWANCE_WALL_SEC };
+}
+
+/** Short when the shortfall is over BOTH the allowance and 20 % of the
+ *  expectation: a 1 s request keeps its warm-up, a 60 s request tolerates
+ *  12 s, and 0.63 s out of 3 s is short. */
+export function captureVerdict(actualSec: number, exp: CaptureExpectation): CaptureVerdict {
+  const shortfallSec = Math.max(0, exp.expectedSec - actualSec);
+  const short = shortfallSec > Math.max(exp.allowanceSec, 0.2 * exp.expectedSec);
+  return { expectedSec: Math.round(exp.expectedSec * 10) / 10, shortfallSec: Math.round(shortfallSec * 10) / 10, short };
+}
+
+/** Facts the file is usable without, but the agent asked for. The list is
+ *  always present in the stop payload (empty = nothing to report). */
+export function stopWarnings(mic: number | null, hasAudio: boolean): string[] {
+  const w: string[] = [];
+  if (mic !== null && !hasAudio) {
+    w.push(`mic ${mic} was requested but the file has no audio track (the device delivered no samples)`);
+  }
+  return w;
+}
+
 // ──────────────────────────── record ─────────────────────────────────────
 
 /** Quote that is safe for display (dry-run). Do not use it to execute a command. */
@@ -1132,6 +1276,7 @@ function cmdRecord(argv: string[]): number {
       device: { index: dev.index, name: dev.name, width: dims.w, height: dims.h },
       crop,
       mic,
+      capSec,
     };
     try {
       writePidfile(state);
@@ -1209,6 +1354,9 @@ function cmdStop(argv: string[]): number {
     );
   }
 
+  // The wall clock ends at the stop request: the signal escalation and the
+  // flush that follow add seconds, not frames.
+  const stopRequestedAt = Date.now();
   const res = stopRecording(state);
   if (res.stoppedBy !== "already-exited" && res.stoppedBy !== "stale" && !res.signaled) {
     // Every kill attempt failed (e.g. a foreign-user pidfile in sticky
@@ -1231,21 +1379,48 @@ function cmdStop(argv: string[]): number {
     );
   }
   const kbPerSec = info.bytes / 1024 / info.durationSeconds;
-  const elapsedWall = (Date.now() - Date.parse(state.startedAt)) / 1000;
+  const elapsedWall = (stopRequestedAt - Date.parse(state.startedAt)) / 1000;
+  const wallSeconds = Math.round(elapsedWall * 10) / 10;
+  const verdict = captureVerdict(
+    info.durationSeconds,
+    expectedCapture(state.capSec, elapsedWall, res.stoppedBy === "already-exited"),
+  );
+  const warnings = stopWarnings(state.mic, info.hasAudio);
+  if (verdict.short) {
+    // The file is valid and plays up to where it ends, so every fact goes
+    // into the error: the agent decides whether to keep it or record again.
+    throw new RunError(
+      `Short capture: ${state.output} holds ${info.durationSeconds.toFixed(1)} s, expected about ${verdict.expectedSec} s (stopped by ${res.stoppedBy}). avfoundation stopped delivering frames. Record again. ffmpeg log: ${logTail()}`.trimEnd(),
+      {
+        shortCapture: true,
+        stoppedBy: res.stoppedBy,
+        output: state.output,
+        wallSeconds,
+        expectedSec: verdict.expectedSec,
+        shortfallSec: verdict.shortfallSec,
+        verified: info,
+        kbPerSec: Math.round(kbPerSec),
+        warnings,
+      },
+    );
+  }
   emitJsonOr(
     a,
     [
       `✅ ${state.output}`,
       `   ${info.width}×${info.height}${info.hasAudio ? " +audio" : ""} · ${info.durationSeconds.toFixed(1)}s · ${(info.bytes / 1048576).toFixed(2)} MB · ${kbPerSec.toFixed(0)} KB/s`,
       `   stopped by ${res.stoppedBy} · wall ${elapsedWall.toFixed(1)}s`,
+      ...warnings.map((w) => `   ⚠ ${w}`),
     ].join("\n"),
     {
       stopped: true,
       stoppedBy: res.stoppedBy,
       output: state.output,
-      wallSeconds: Math.round(elapsedWall * 10) / 10,
+      wallSeconds,
+      expectedSec: verdict.expectedSec,
       verified: info,
       kbPerSec: Math.round(kbPerSec),
+      warnings,
     },
   );
   return 0;
@@ -1328,6 +1503,7 @@ function cmdStatus(argv: string[]): number {
       output: state.output,
       startedAt: state.startedAt,
       elapsedSec: Math.round(elapsedSec * 10) / 10,
+      capSec: state.capSec,
       bytes,
       crop: state.crop,
       device: state.device,
@@ -1408,8 +1584,9 @@ function main(argv: string[]): number {
     const usage = e instanceof UsageError;
     const msg = e instanceof Error ? e.message : String(e);
     if (wantsJson) {
+      const details = e instanceof RunError ? e.details : {};
       process.stderr.write(
-        JSON.stringify({ error: msg, class: usage ? "usage" : "runtime" }, null, 2) + "\n",
+        JSON.stringify({ error: msg, class: usage ? "usage" : "runtime", ...details }, null, 2) + "\n",
       );
     } else if (usage) {
       process.stderr.write(`Argument error: ${msg}\nType \`node pomulum.ts --help\`.\n`);

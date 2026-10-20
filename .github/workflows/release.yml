@@ -1,0 +1,66 @@
+name: Release
+
+# Runs in the public repository when publish.sh pushes a `v*` tag. It repeats
+# the deterministic gates on the tagged tree, checks the tag against the
+# version the CLI prints, and publishes a GitHub Release with pomulum.ts
+# attached: the whole product is that one file. The release notes are the
+# matching CHANGELOG section, so a tag without one fails here, not later.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The unit suite resolves the real toolchain, so ffmpeg must exist.
+      - name: Ensure ffmpeg
+        run: |
+          if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
+            echo "ffmpeg already present"
+            exit 0
+          fi
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Tag matches the version the CLI prints
+        run: |
+          set -eu
+          cli="$(node pomulum.ts --version | awk '{print $2}')"
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          test "$tag" = "$cli" || { echo "tag $GITHUB_REF_NAME but the CLI prints $cli" >&2; exit 1; }
+          test "$cli" = "$pkg" || { echo "CLI prints $cli but package.json says $pkg" >&2; exit 1; }
+
+      - name: Deterministic gates
+        run: bash scripts/check.sh
+
+      - name: Release notes from the CHANGELOG section
+        run: |
+          set -eu
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '
+            $0 ~ "^## " v "( |$)" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no '## $v' section" >&2; exit 1; }
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "pomulum $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            pomulum.ts skills/pomulum/SKILL.md

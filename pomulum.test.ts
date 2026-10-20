@@ -9,15 +9,20 @@ import { fileURLToPath } from "node:url";
 import {
   HALF_SCALE_FILTER,
   RunError,
+  SHORTFALL_ALLOWANCE_CAP_SEC,
+  SHORTFALL_ALLOWANCE_WALL_SEC,
   TCC_REMEDY,
   UsageError,
+  appBundleRoot,
   asciiTimestamp,
   buildFfmpegArgs,
+  captureVerdict,
   clampCrop,
   cropUnusable,
   cropWasClamped,
   effectiveDurationCap,
   evenAligned,
+  expectedCapture,
   locateToolchain,
   looksLikeOurRecorder,
   parseArgv,
@@ -26,10 +31,13 @@ import {
   parsePidfile,
   requireWritableDir,
   resolveEncodeMode,
+  resolveScreenPermission,
   scaledDims,
   screensNeedingProbe,
   selectScreen,
+  stopWarnings,
   tccHint,
+  tccutilLine,
   videoFilter,
 } from "./pomulum.ts";
 
@@ -361,7 +369,7 @@ test("parsePidfile: a pending claim parses to the pending state", () => {
   assert.equal(s.output, "/tmp/x.mp4");
 });
 
-test("parsePidfile: a recording parses with every field, and defaults crop/mic", () => {
+test("parsePidfile: a recording parses with every field, and defaults crop/mic/capSec", () => {
   const s = parsePidfile(
     JSON.stringify({
       state: "recording",
@@ -378,6 +386,17 @@ test("parsePidfile: a recording parses with every field, and defaults crop/mic",
   assert.equal(s.device.index, 3);
   assert.equal(s.crop, null);
   assert.equal(s.mic, null);
+  assert.equal(s.capSec, null);
+});
+
+test("parsePidfile: capSec round-trips as a positive number and nothing else", () => {
+  const base = { state: "recording", pid: 7, output: "/tmp/x.mp4", command: "ffmpeg", startedAt: "2026-10-15T10:00:00.000Z", device: { index: 1, name: "s" } };
+  const withCap = parsePidfile(JSON.stringify({ ...base, capSec: 1800 }));
+  assert.equal(withCap.state === "recording" && withCap.capSec, 1800);
+  for (const capSec of [0, -3, "60", null]) {
+    const s = parsePidfile(JSON.stringify({ ...base, capSec }));
+    assert.equal(s.state === "recording" && s.capSec, null, `capSec ${JSON.stringify(capSec)} must read as null`);
+  }
 });
 
 test("parsePidfile: corrupt JSON, an unknown shape, and a bad pid are all rejected", () => {
@@ -402,6 +421,76 @@ test("parsePidfile: corrupt JSON, an unknown shape, and a bad pid are all reject
     );
   }
   assert.throws(() => parsePidfile(JSON.stringify({ state: "pending", output: "/tmp/x.mp4" })), RunError);
+  // a startedAt that does not parse would make every wall-clock number NaN
+  assert.throws(
+    () => parsePidfile(JSON.stringify({ state: "pending", output: "/tmp/x.mp4", startedAt: "yesterday-ish" })),
+    RunError,
+  );
+});
+
+// ── capture verdict (a readable file is not yet the file the agent asked for) ──
+
+test("expectedCapture: a reached cap is the expectation with the tight allowance; otherwise the wall clock", () => {
+  assert.deepEqual(expectedCapture(3, 7.4, true), { expectedSec: 3, allowanceSec: SHORTFALL_ALLOWANCE_CAP_SEC });
+  assert.deepEqual(expectedCapture(60, 60, true), { expectedSec: 60, allowanceSec: SHORTFALL_ALLOWANCE_CAP_SEC });
+  // stopped by hand before the cap: the wall clock is what the agent waited
+  assert.deepEqual(expectedCapture(60, 10.2, false), { expectedSec: 10.2, allowanceSec: SHORTFALL_ALLOWANCE_WALL_SEC });
+  assert.deepEqual(expectedCapture(null, 10.2, false), { expectedSec: 10.2, allowanceSec: SHORTFALL_ALLOWANCE_WALL_SEC });
+  assert.deepEqual(expectedCapture(null, -0.3, true), { expectedSec: 0, allowanceSec: SHORTFALL_ALLOWANCE_WALL_SEC });
+});
+
+test("expectedCapture: ffmpeg ending on its own before its cap is a stall or a crash, so the cap is the measure", () => {
+  // --duration 60, frames stall at 20 s, ffmpeg exits at 21.5 s, stop at 23 s:
+  // a wall-clock expectation (4.6 s threshold) would wave the defect through
+  assert.deepEqual(expectedCapture(60, 23, true), { expectedSec: 60, allowanceSec: SHORTFALL_ALLOWANCE_CAP_SEC });
+  assert.equal(captureVerdict(20, expectedCapture(60, 23, true)).short, true);
+  // the same file and wall clock, but WE sent the SIGINT: an intentional
+  // early stop, not a defect
+  assert.equal(captureVerdict(20, expectedCapture(60, 23, false)).short, false);
+  // a capped recording that ends on its own just past the cap is fine
+  assert.equal(captureVerdict(59.97, expectedCapture(60, 61, true)).short, false);
+});
+
+test("captureVerdict: the live defect (0.63 s out of a 3 s request) is short; a frame-accurate cap is not", () => {
+  const live = captureVerdict(0.633334, expectedCapture(3, 7.5, true));
+  assert.equal(live.short, true);
+  assert.equal(live.expectedSec, 3);
+  assert.equal(live.shortfallSec, 2.4);
+  const exact = captureVerdict(59.966667, expectedCapture(60, 61.2, true));
+  assert.equal(exact.short, false);
+  assert.equal(exact.shortfallSec, 0);
+});
+
+test("captureVerdict: the allowance absorbs warm-up on wall-clock stops; a stall is still short", () => {
+  // 10 s by hand, 8 s of frames: spawn + warm-up + flush, not a defect
+  assert.equal(captureVerdict(8, expectedCapture(null, 10, false)).short, false);
+  // 10 s by hand, 2 s of frames: avfoundation stalled
+  assert.equal(captureVerdict(2, expectedCapture(null, 10, false)).short, true);
+  // a 1 s request keeps its warm-up (0.4 s shortfall is under the 1 s allowance)
+  assert.equal(captureVerdict(0.6, expectedCapture(1, 1.8, true)).short, false);
+  // 20 % rule on long caps: 12 s missing out of 60 is the edge, 12.1 is short
+  assert.equal(captureVerdict(48, expectedCapture(60, 60, true)).short, false);
+  assert.equal(captureVerdict(47.9, expectedCapture(60, 60, true)).short, true);
+  // a file longer than the expectation is never short
+  assert.equal(captureVerdict(12, expectedCapture(null, 10, false)).shortfallSec, 0);
+});
+
+test("stopWarnings: a requested mic with no audio track is reported; no mic or audio present is silent", () => {
+  assert.deepEqual(stopWarnings(null, false), []);
+  assert.deepEqual(stopWarnings(1, true), []);
+  const w = stopWarnings(0, false);
+  assert.equal(w.length, 1);
+  assert.match(w[0], /mic 0 was requested/);
+  assert.match(w[0], /no audio track/);
+});
+
+test("RunError: details ride along for the --json error object and default to an empty object", () => {
+  const plain = new RunError("x");
+  assert.deepEqual(plain.details, {});
+  assert.equal(plain.message, "x");
+  const rich = new RunError("short", { shortCapture: true, output: "/tmp/x.mp4" });
+  assert.deepEqual(rich.details, { shortCapture: true, output: "/tmp/x.mp4" });
+  assert.ok(rich instanceof Error);
 });
 
 // ── tccHint (remedy hint for a lost Screen Recording grant) ──────────────
@@ -418,6 +507,31 @@ test("tccHint: the hint is the shared remedy, and it points at the host app", ()
   const hint = tccHint(null, "");
   assert.ok(hint.includes(TCC_REMEDY));
   assert.ok(/never to ffmpeg/.test(TCC_REMEDY));
+  assert.ok(/reopen THAT app/.test(TCC_REMEDY)); // the relaunch step is in the shared remedy
+});
+
+test("tccHint: a known bundle id adds the targeted tccutil command; no id adds none", () => {
+  const withId = tccHint(null, "", "com.example.host");
+  assert.ok(withId.includes("tccutil reset ScreenCapture com.example.host"));
+  const withoutId = tccHint(null, "");
+  assert.ok(!withoutId.includes("tccutil"));
+  assert.ok(tccutilLine("com.example.host").includes("reopen the app"));
+});
+
+// ── resolveScreenPermission (classify a screens run) ─────────────────────
+
+test("resolveScreenPermission: screens win, screens-less-with-mics is blocked, both empty is no-devices", () => {
+  assert.equal(resolveScreenPermission([1, 2], []), "ok");
+  assert.equal(resolveScreenPermission([], [{ index: 0, name: "mic" }]), "blocked");
+  assert.equal(resolveScreenPermission([], []), "no-devices");
+});
+
+// ── appBundleRoot (bundle root from an app-bundle executable path) ───────
+
+test("appBundleRoot: app-bundle paths resolve to the .app root; other paths are null", () => {
+  assert.equal(appBundleRoot("/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness"), "/Applications/DeepSeek Harness.app");
+  assert.equal(appBundleRoot("/usr/local/bin/node"), null);
+  assert.equal(appBundleRoot("Relative.app/Contents/MacOS/Rel"), null); // not absolute
 });
 
 // ── requireWritableDir (a missing folder is not a denied folder) ─────────
