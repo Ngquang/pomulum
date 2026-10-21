@@ -34,7 +34,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 
 // ─────────────────────────── types (erasable-only) ───────────────────────
 
@@ -289,8 +289,10 @@ export function ffprobeDims(t: Toolchain, file: string): { w: number; h: number 
  *  used to drift (one of them told the user to check the permission "of
  *  ffmpeg"); a unit test and a `check.sh` gate now hold the line. */
 export const TCC_REMEDY =
-  "macOS attributes the Screen Recording grant (TCC) to the app that RUNS the recording —" +
-  " your terminal or agent host (Terminal, iTerm, ZCode, DeepSeek Harness) — never to ffmpeg." +
+  "First make sure a display is active. A screen that is off, a closed lid, or a remote session" +
+  " with no on-screen display gives the same empty screen list as a lost grant." +
+  " macOS attributes the Screen Recording grant (TCC) to the app that RUNS the recording" +
+  " (your terminal or agent host: Terminal, iTerm, ZCode, DeepSeek Harness), never to ffmpeg." +
   " Open System Settings → Privacy & Security → Screen Recording and toggle THAT app OFF and ON." +
   " Then fully quit and reopen THAT app: a running process re-reads the permission only at launch." +
   " Recent macOS versions drop the grant when a display is connected or disconnected.";

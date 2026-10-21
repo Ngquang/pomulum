@@ -4,6 +4,20 @@ Notable changes, newest first. `pomulum --version` is the only source of truth
 for what you are running: the constant in `pomulum.ts`, `package.json`, and what
 the CLI prints must agree, and `scripts/check.sh` fails the build if they do not.
 
+## 0.2.2 — 2026-10-21
+
+The Screen Recording remedy now leads with the display check: a screen
+that is off, a closed lid, or a remote session with no on-screen display
+lists zero capture screens exactly like a lost grant. Confirmed live on
+2026-10-21: both screens returned without any re-grant. On a host that
+also lists microphones, `screenPermission` still reports "blocked" for
+both causes; a mic-less host reports "no-devices". avfoundation offers
+no signal to tell the two causes apart.
+
+The README flow diagram is now a sequence diagram. It shows the real
+division of work: the agent reads the snap and picks the crop itself,
+ffmpeg encodes in one realtime pass, and `stop` verifies the file.
+
 ## 0.2.1 — 2026-10-20
 
 **`stop` now fails a short capture.** A valid mp4 is not yet the file the

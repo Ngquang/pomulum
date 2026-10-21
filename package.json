@@ -1,6 +1,6 @@
 {
   "name": "pomulum",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Agent screen recorder CLI for macOS: one file, no dependencies, ffmpeg engine",
   "license": "MIT",
   "author": "lukeng",

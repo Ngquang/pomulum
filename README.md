@@ -5,7 +5,7 @@ One command to see (`snap`), two to act (`record`, `stop`), one contract to
 trust (`--json` + ffprobe). No GUI appears at any step. One file, no
 dependencies, no build step: run it with Node >= 22.18.
 
-![pomulum flow: an agent calls pomulum, pomulum drives ffmpeg, stop verifies the file with ffprobe](docs/flow.svg)
+![pomulum flow: screens, snap, record in one ffmpeg realtime pass, stop, ffprobe verify, JSON verdict](docs/flow.svg)
 
 ## Why
 
@@ -57,10 +57,13 @@ again after every change.
 
 ## Troubleshooting
 
-- **`screens` returns 0 screens, or a capture hangs.** Your host app lost
-  its Screen Recording grant. Toggle THAT app OFF and ON in System
-  Settings, then quit and reopen it. On recent macOS versions the grant often
-  disappears when a display connects or disconnects.
+- **`screens` returns 0 screens, or a capture hangs.** First make sure a
+  display is active: a screen that is off, a closed lid, or a remote session
+  with no display gives the same empty list as a lost grant. If a display is
+  active and the list is still empty, your host app lost its Screen
+  Recording grant: toggle THAT app OFF and ON in System Settings, then quit
+  and reopen it. On recent macOS versions the grant often disappears when a
+  display connects or disconnects.
 - **A `--crop` does not fit.** pomulum refuses it with exit 2. A partial fit
   comes back clamped, with `cropClamped: true` in the JSON.
 - **Device indexes changed.** They shift when a display connects or

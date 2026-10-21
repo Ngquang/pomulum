@@ -68,7 +68,7 @@ fi
 # private workspace or a user home path. This checker and the standards file
 # quote the patterns, so both are excluded from the scan.
 LEAK=$(grep -rnE '(/Users/|Desktop/workspace|research/)' \
-  --include='*.ts' --include='*.md' --include='*.sh' --include='*.json' --include='*.mjs' . \
+  --include='*.ts' --include='*.md' --include='*.sh' --include='*.json' --include='*.mjs' --include='*.svg' . \
   | grep -v '^\./scripts/check.sh' | grep -v '^\./docs/STANDARDS.md')
 if [ -z "$LEAK" ]; then
   ok "no internal paths or research references"

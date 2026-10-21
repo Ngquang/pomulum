@@ -118,9 +118,14 @@ plus the applied `crop` with `cropClamped: true`; check that flag.
   It is not the ordinal in the name; `Capture screen 1` can have device
   index 4. To record the screen NAMED "Capture screen 1", pass the index
   shown next to that name.
-- When `screens` reports `screenPermission: "blocked"`, or a capture hangs:
-  the Screen Recording permission (TCC) of the HOST APP was lost. Ask the
-  user to open System Settings → Privacy & Security → Screen Recording.
+- When `screens` reports `screenPermission: "blocked"` or `"no-devices"`, or
+  a capture hangs: FIRST check the display. A screen that is off, a closed
+  lid, or a remote session with no display gives the same empty list as a
+  lost grant (seen live 2026-10-21: screens returned without any re-grant).
+  Wake the display
+  and run `screens` again before touching System Settings. If the list is
+  still empty, the Screen Recording permission (TCC) of the HOST APP was
+  lost. Ask the user to open System Settings → Privacy & Security → Screen Recording.
   Toggle the entry of the HOST APP (ZCode, DeepSeek Harness, Terminal; not
   `ffmpeg`) OFF and ON. That entry exists only when ffmpeg runs without an
   app wrapper. Then fully quit and reopen the HOST APP: a running process
