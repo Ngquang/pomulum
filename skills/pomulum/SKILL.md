@@ -1,9 +1,9 @@
 ---
 name: pomulum
 description: >
-  Record or capture the macOS screen with a CLI — made for agents, no GUI
+  Record or capture the macOS screen with a CLI - made for agents, no GUI
   needed. Trigger phrases (the user speaks Vietnamese): "quay màn hình",
-  "chụp màn hình", "record màn hình", "record vùng này" — and the English
+  "chụp màn hình", "record màn hình", "record vùng này" - and the English
   equivalents "screen recording", "record a demo/bug/flow".
   The agent reads a snapshot with vision to select the crop coordinates,
   then records and stops. JSON contract; verification with ffprobe.
@@ -28,7 +28,7 @@ network access, no telemetry, and no package dependencies.
 
 | Capability | Detail |
 |---|---|
-| Runs | `node pomulum.ts`, which spawns `ffmpeg`, `ffprobe`, `/usr/bin/caffeinate -i` (macOS), `/bin/ps` and `/usr/bin/ps` (process identity), and `/usr/bin/plutil` (reads the host app's `Info.plist` for the TCC hint). All spawns use argument arrays; no shell. |
+| Runs | `node pomulum.ts`, which spawns `ffmpeg`, `ffprobe`, `/usr/bin/caffeinate -i` (macOS), `/bin/ps` and `/usr/bin/ps` (process identity), `/usr/bin/pgrep` (lists the members of a recording's process group), and `/usr/bin/plutil` (reads the host app's `Info.plist` for the TCC hint). All spawns use argument arrays; no shell. |
 | Writes | The recording (`--out`, default `~/Desktop/pomulum-<time>.mp4`); the pidfile `/tmp/pomulum-rec.pid` and the log `/tmp/pomulum-ffmpeg.log` (both mode 0600, exclusive creation, no symlink following); a snapshot PNG in the private per-user temp directory unless `--out` is given; the device-dimension cache `~/Library/Caches/pomulum/screen-cache.json`. |
 | Reads | Its own JSON output, the pidfile, the ffmpeg log, the snapshot PNG (the agent views it), and `ps` output to confirm process identity. |
 | Permissions | Screen Recording for the HOST APP (it captures the screen); Microphone when audio is on (on by default). No other permission is requested. |
@@ -42,29 +42,40 @@ network access, no telemetry, and no package dependencies.
 node $POMULUM screens --json                    # 1. list screens + mics (real pixel dimensions, cached)
 node $POMULUM snap --screen N --out /tmp/s.png  # 2. capture one frame at native resolution of screen N
 # 3. the agent Reads the PNG (vision) and selects an area in image PIXELS.
-#    Image coordinates equal crop coordinates 1:1 — there is NO coordinate
+#    Image coordinates equal crop coordinates 1:1 - there is NO coordinate
 #    conversion step.
 node $POMULUM record --screen N --crop x:y:w:h --duration 60 --json
-node $POMULUM status --json                     # is a recording in progress — what, where, how long
+node $POMULUM status --json                     # is a recording in progress - what, where, how long
 node $POMULUM stop --json                       # ALWAYS the last step: stop, verify with ffprobe,
-                                                # and clean the pidfile — also right after a
+                                                # and clean the pidfile - also right after a
                                                 # --duration recording that ended by itself
 ```
 
 ## Commands and main flags
 
-- `screens [--json] [--no-cache]`: avfoundation screens + mics, real dimensions
+- `screens [--json] [--no-cache]`: avfoundation screens + mics, real dimensions.
+  A display whose probe fails (for example an HDMI ghost after an unplug)
+  reports `width: null` plus an entry in `warnings`; the healthy displays
+  still answer.
 - `snap [--out F] [--screen N]`: one native-resolution PNG (about 0.7 s)
 - `record [--crop x:y:w:h] [--screen N] [--duration N] [--max-duration N]
   [--out F] [--no-mic] [--half] [--full-res] [--small] [--dry-run] [--json]`
   : detached (the prompt returns immediately); the microphone is ON by
-  default (the system default mic, index 0; v0 has no mic picker); a
+  default (the first LOCAL microphone of the `screens` list: Continuity
+  devices such as a linked iPhone are skipped; the chosen name comes back
+  as `micName`; v0 has no mic picker); a
   safety limit of 30 minutes applies when you do not set `--duration`
   (`--max-duration 0` removes the limit)
-- `status [--json]`: always exits with 0; `capSec` is the limit the
+- `status [--json]`: exits 0 for every pidfile state (a corrupt pidfile is
+  a runtime error, exit 1); `capSec` is the limit the
   recording stops at on its own (`null` = none)
-- `stop [--json]`: SIGINT, then verification with ffprobe (the exit code of
+- `stop [--json]`: SIGINT to the full process group (ffmpeg leader plus the
+  caffeinate supervisor child), then
+  verification with ffprobe (the exit code of
   ffmpeg is not trusted), then escalation to SIGTERM and SIGKILL.
+  A stop during a fresh record start (< 60 s pending) exits 1 and KEEPS
+  the pidfile; retry in a moment. A stale pidfile (the pid is foreign)
+  exits 0 with `{stopped: false, stale: true}` and removes the pidfile.
   `wallSeconds` is the wall-clock time from `record` to `stop`.
   `expectedSec` is what the file should hold: the `--duration` cap when
   ffmpeg reached it or ended on its own before it (a stall or a crash), else
@@ -94,10 +105,12 @@ JSON, not against the crop; that field is exact (each axis is floored to an
 even size, which the encoder requires).
 
 **Do not guess crop coordinates.** A `--crop` that does not fit the
-selected screen exits **2** with the real screen size and the largest area at
-that origin; it is never shrunk silently. Take the numbers from a `snap` of
-the same screen. A crop that fits only partly comes back as `requestedCrop`
-plus the applied `crop` with `cropClamped: true`; check that flag.
+selected screen exits **2** when what remains at that origin is under the
+usable floor (8 px full resolution, 16 px at half scale); the error carries
+the real screen size and the largest area at that origin. A crop that fits
+only partly clamps to the largest area and comes back as `requestedCrop`
+plus the applied `crop` with `cropClamped: true`; check that flag. Take the
+numbers from a `snap` of the same screen.
 
 ## Contract
 
@@ -133,7 +146,8 @@ plus the applied `crop` with `cropClamped: true`; check that flag.
   disappears after the user connects or disconnects an external display
   (seen twice in 10/2026). Check whether the display setup changed recently.
   If the entry still will not stick, read the `hint` field of
-  `screens --json`. It carries the exact `tccutil` command.
+  `screens --json`. It carries the exact `tccutil` command when the host
+  app's bundle id is known.
 - Verify a recording with the JSON output of `stop` (ffprobe data), never
   with ffmpeg's exit code. pomulum's own exit 1 with `shortCapture: true`
   means: valid file, too short, record again. Read `warnings` as well.

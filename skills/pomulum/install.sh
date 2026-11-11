@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh — copy pomulum.ts + SKILL.md into an agent's skill folder.
+# install.sh - copy pomulum.ts + SKILL.md into an agent's skill folder.
 #
 #   bash install.sh                      # -> $POMULUM_SKILL_DIR, or ~/.zcode/skills/pomulum
 #   bash install.sh --all                # every known host folder that exists
@@ -8,7 +8,7 @@
 #
 # --all looks for the folders of the hosts in use: ZCode (~/.zcode/skills),
 # the cross-agent convention (~/.agents/skills) and Claude Code
-# (~/.claude/skills). One command keeps every host on the same copy — two
+# (~/.claude/skills). One command keeps every host on the same copy - two
 # installs that drift apart are two sources of truth.
 #
 # The skill keeps a COPY, not a symlink: run this again after every change to
@@ -23,7 +23,7 @@ install_to() {
   cp skills/pomulum/SKILL.md "$dest/SKILL.md"
   # The installed folder sits OUTSIDE the repo, so it needs its own module
   # marker: without it Node guesses the module type of the copied .ts file and
-  # prints MODULE_TYPELESS_PACKAGE_JSON on stderr for every command — noise
+  # prints MODULE_TYPELESS_PACKAGE_JSON on stderr for every command - noise
   # that an agent reading JSON can mistake for an error.
   printf '{\n  "type": "module",\n  "private": true\n}\n' > "$dest/package.json"
   echo "installed → $dest"

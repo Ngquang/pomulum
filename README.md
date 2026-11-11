@@ -12,9 +12,10 @@ dependencies, no build step: run it with Node >= 22.18.
 - **Made for agents.** Every command answers in JSON with exit codes 0/1/2.
   A crop is pixels from `snap`, 1:1, with no conversion. The macOS recorder
   is a GUI overlay only.
-- **Small files.** Full resolution at CRF 26 runs at about 105 KB/s: a
-  2-minute demo is about 13 MB, 7.5x smaller than the macOS recorder in a
-  same-moment A/B. VMAF 94.6 ([docs/BENCHMARK.md](docs/BENCHMARK.md)).
+- **Small files.** Full resolution at CRF 26 runs at about 70-105 KB/s of
+  desktop motion: a 2-minute demo is about 8-13 MB, 7.5x smaller than the
+  macOS recorder in a same-moment A/B. VMAF 94.6
+  ([docs/BENCHMARK.md](docs/BENCHMARK.md)).
   `--half` trades resolution for about 55% less size (VMAF 91.0).
 - **Zero cost when idle.** No daemon, no background process, no config file.
 - **The avfoundation pitfalls, paid once.** The raw input blocks without an
@@ -65,7 +66,9 @@ again after every change.
   and reopen it. On recent macOS versions the grant often disappears when a
   display connects or disconnects.
 - **A `--crop` does not fit.** pomulum refuses it with exit 2. A partial fit
-  comes back clamped, with `cropClamped: true` in the JSON.
+  comes back clamped, with `cropClamped: true` in the JSON, unless what
+  remains is under the usable floor (8 px, or 16 px at half scale): that is
+  a coordinate bug and exits 2.
 - **Device indexes changed.** They shift when a display connects or
   disconnects. Read `screens` fresh. Never hardcode an index.
 - **`stop` exits 1 with `shortCapture: true`.** The file is valid but holds

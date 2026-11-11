@@ -25,7 +25,7 @@ screens --json          → device list (real pixel dimensions, cached)
 snap --screen N         → one native-resolution PNG frame
   (the agent reads the image with vision and selects an area)
 record --screen N --crop x:y:w:h --json     (detached; prompt returns at once)
-status --json           → is a recording in progress — what, where, how long
+status --json           → is a recording in progress - what, where, how long
 stop --json             → stop + verify the recording with ffprobe
 ```
 
@@ -95,7 +95,8 @@ We protect the primitive shape on purpose:
 ## Performance
 
 - A recording costs about 1 of 6 CPU cores end to end at the
-  full-resolution default (capture + encode; 0.5 cores with `--half`)
+  full-resolution default, peaking at ~1.2 during capture + encode
+  (0.5 cores with `--half`)
 - pomulum caches the `screens` result on disk (~1.7 s → ~0.1 s); the key is
   the signature of the device list, with a 1 h TTL; `--no-cache` bypasses it
 - pomulum **discovers device indexes at runtime and never hardcodes them**:

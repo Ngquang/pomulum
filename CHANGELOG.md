@@ -4,7 +4,64 @@ Notable changes, newest first. `pomulum --version` is the only source of truth
 for what you are running: the constant in `pomulum.ts`, `package.json`, and what
 the CLI prints must agree, and `scripts/check.sh` fails the build if they do not.
 
-## 0.2.2 — 2026-10-21
+## 0.2.3 - 2026-11-11
+
+Internal audit pass (four parallel read-only audits; findings verified by hand
+before the fix). No public release yet.
+
+**Fixed.**
+
+- `stop` no longer deletes a FRESH pending pidfile. The old code removed the
+  claim while the starting `record` still owned it, so a recording could
+  appear AFTER `stop` had said none exists and then run to its cap untracked.
+  A pending claim older than 60 s is still removed (a dead start).
+- The pending-to-recording pidfile upgrade is now atomic (temp file +
+  rename). The old remove-then-create left a window with no pidfile, wide
+  enough for a second `record` to claim during the upgrade.
+- `stop` on a stale pidfile (the pid now belongs to a foreign process) no
+  longer answers the SUCCESS envelope for a recording it never signalled.
+  It reports `stopped: false, stale: true` with the earlier file's facts.
+- `--screen ""`, `--max-duration ""`, hex values ("0x2") and empty crop
+  components ("100::800:600") are argument errors now, and so are the
+  other silent forms `Number()` used to accept: exponents ("1e3"),
+  padded values (" 1"), a leading plus ("+5"), a bare fraction (".5"), a
+  fractional screen index ("1.5"), and a value too large for a double.
+  `Number("")` is 0 and `Number("0x2")` is 2, so a typo could select the
+  wrong screen or silently remove the duration cap.
+- A detached spawn that fails asynchronously no longer prints a raw
+  uncaught-exception stack after the clean error message.
+- `claimPidfile` reports a full /tmp or a foreign-owned pidfile as what it
+  is (a write error), not as "another command claimed the file".
+- The screen-dimension cache rejects a corrupt timestamp (NaN age), a
+  future timestamp (clock skew), and malformed dimension entries.
+- `record` failures during the start-watch surface after 300 ms instead of
+  a fixed 900 ms sleep (same 900 ms ceiling, same success timing).
+- The stop unit is the process GROUP, not the bare leader pid. The spawned
+  pid execs from caffeinate into ffmpeg and stays the group leader (a
+  caffeinate supervisor child runs beside it). A leaderless group is only
+  signalled after pgrep positively identifies a member as pomulum's; a
+  reused pid leading a foreign group is refused. `status` reports a
+  recording as live while a positively identified member still runs, and
+  the escalation waits for the whole group to end.
+
+**Changed.**
+
+- `snap` and the device probes read the PNG IHDR header in-process instead
+  of spawning ffprobe (about 200 ms faster per snap; ffprobe stays as the
+  fallback for non-PNG output).
+- `screens` isolates a dead display: a probe that fails (for example an
+  HDMI ghost after an unplug) reports `width: null` for that device plus a
+  `warnings` array, instead of failing the whole command with a misleading
+  permission hint. Healthy displays still answer.
+- The default microphone skips Continuity devices (a linked iPhone or
+  iPad). The pick is named: `record` and `status` answer `micName`.
+- `record --help` lists `--max-duration`, which the usage line had omitted.
+- The status docstring and the help text state the real crop rule (partial
+  fit clamps with `cropClamped`; only a sub-floor remainder is refused).
+- `stop`/`status` identity checks use `/usr/bin/pgrep` (absolute path, same
+  discipline as `ps`) to list the members of a recording's process group.
+
+## 0.2.2 - 2026-10-21
 
 The Screen Recording remedy now leads with the display check: a screen
 that is off, a closed lid, or a remote session with no on-screen display
@@ -18,7 +75,7 @@ The README flow diagram is now a sequence diagram. It shows the real
 division of work: the agent reads the snap and picks the crop itself,
 ffmpeg encodes in one realtime pass, and `stop` verifies the file.
 
-## 0.2.1 — 2026-10-20
+## 0.2.1 - 2026-10-20
 
 **`stop` now fails a short capture.** A valid mp4 is not yet the file the
 agent asked for: avfoundation can stop delivering frames and ffmpeg then
@@ -53,7 +110,7 @@ quit and reopen it, and, when the bundle id is known, the exact
 re-reads the permission only at launch, so the relaunch step is not
 optional.
 
-## 0.2.0 — 2026-10-18
+## 0.2.0 - 2026-10-18
 
 **The default is now full resolution.** We chose the half-scale default while
 the benchmark's quality column was inflated by the swapped libvmaf inputs
@@ -70,7 +127,7 @@ smaller than the macOS default recorder ([docs/BENCHMARK.md](docs/BENCHMARK.md))
 - `expectedDims` stays exact for whatever mode runs. Agents that assumed
   half-scale output must read the field instead of computing it.
 
-## 0.1.1 — 2026-10-18
+## 0.1.1 - 2026-10-18
 
 Two correctness fixes found by an external claim benchmark (a 60 s live
 recording of a second display, plus a re-run of the encoder matrix):
@@ -91,7 +148,7 @@ The benchmark scripts now pass the encoded file first and scale the reference
 to the encoded size. We re-measured the quality numbers in the README and
 docs/BENCHMARK.md with the corrected order.
 
-## 0.1.0 — 2026-10-16
+## 0.1.0 - 2026-10-16
 
 The first public release. One file, no dependencies, no build step.
 Commands: `screens`, `snap`, `record`, `status`, `stop`. Contract: `--json`
@@ -125,7 +182,7 @@ is the sum of them. The code, the tests, and
 [docs/STANDARDS.md](docs/STANDARDS.md) contain what they settled. The
 decisions that still shape the product:
 
-- **0.2.2 (internal):** a crop that does not fit is refused instead of clamped;
+- **0.2.2 (internal):** a crop below the usable floor is refused instead of clamped to a 2×2 smear;
   the half-scale filter can no longer ask for an odd width (libx264 refuses
   `yuv420p` at an odd width). The unreadable file surfaced only later at
   `stop`. `expectedDims` became exact. The Screen Recording remedy came

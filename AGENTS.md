@@ -16,7 +16,7 @@ ffmpeg does the capture. Read [README.md](README.md) first, then
 - Runtime discovery: device indexes change between sessions. Never store an
   index as a constant in code or docs.
 - New logic gets a pure, exported function and a unit test in
-  `pomulum.test.ts`. Tests never touch ffmpeg or the screen.
+  `pomulum.test.ts`. Tests never run ffmpeg and never touch the screen.
 - Comment only what the code cannot say: a constraint, a measured pitfall,
   an intentional difference. Keep it short.
 - Product text is English in the ASD-STE100 style. No em-dashes.
@@ -29,8 +29,9 @@ ffmpeg does the capture. Read [README.md](README.md) first, then
 - `pomulum.ts`: the whole program. `pomulum.test.ts`: unit tests.
 - `scripts/check.sh`: deterministic gates, no screen access.
   `scripts/e2e-pomulum-ts.sh`: a real recording, run by hand on a Mac.
-- `skills/pomulum/`: the skill other agents install (`SKILL.md` plus a copy
-  of `pomulum.ts`, refreshed by `install.sh`).
+- `skills/pomulum/`: the skill other agents install (`SKILL.md` and
+  `install.sh`). The installer copies `pomulum.ts` and `SKILL.md` into the
+  host's skill folder; the copy lives there, not in this tree.
 - `docs/`: STANDARDS (rules and what enforces them), ARCHITECTURE,
   BENCHMARK, `flow.svg`. `tests/fixtures/`: real avfoundation output.
 

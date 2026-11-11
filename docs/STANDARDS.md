@@ -30,7 +30,7 @@ Severity for a finding in review: **blocker** (stops a release) ·
 | ID | Rule | What it means here | Enforced by |
 |---|---|---|---|
 | V1 | Prove it with the artifact | `stop` verifies the file with ffprobe; we never trust the exit code (rc 255 after SIGINT is normal). A readable file is not proof either: `stop` compares the length with the request and exits 1 on a short capture (`captureVerdict`, unit tested). | unit + e2e + review |
-| V2 | Tests run headless, from anywhere | The suite touches no ffmpeg and no screen, and resolves its fixture from the file URL, not the working directory. | `pomulum.test.ts` |
+| V2 | Tests run headless, from anywhere | The suite spawns no ffmpeg and touches no screen; it resolves its fixture from the file URL, not the working directory. It does need ffmpeg installed (the toolchain test resolves it). | `pomulum.test.ts` |
 | V3 | The contract holds on failures too | Errors are machine-readable: `{error, class}` on stderr when `--json` is present; exit 0 / 1 / 2. | `check.sh` |
 | V4 | One version, one source of truth | `VERSION` in `pomulum.ts`, `package.json`, and what `--version` prints are the same value. | `check.sh` |
 | V5 | Explain the number | Every published figure names what limits it; the file also contains the limitation list. Re-measure before you requote. | [BENCHMARK.md](BENCHMARK.md) + review |
@@ -92,9 +92,10 @@ one threat in that model.
 | D3 | Version claims are exact | The real minimum (`>= 22.18`), not an approximation. An overstated requirement sends users to a broken command. | `check.sh` + review |
 | D4 | Product content in English, STE | Simple, consistent English (ASD-STE100 subset). Vietnamese appears only as skill trigger phrases. The exception register in section 9 lists the approved non-STE terms. | review + the 2026-10-19 audit |
 | D5 | Layered documents | README (user) → `docs/` (design, evidence, standards) → `SKILL.md` (agent). Each layer stands alone. | review |
-| D6 | The research stays private | The public tree is the `pomulum/` subtree only, and no shipped file may reference the private workspace or a home path. | `check.sh` |
+| D6 | The research stays private | The public tree is the `pomulum/` subtree only, and no shipped file may reference the private workspace (`research/`, `videos/`) or a home path. | `check.sh` |
 | D7 | One remedy, one wording | A user-facing remedy comes from one shared constant, and every shipped file is scanned for the wrong version of it. The Screen Recording grant belongs to the app that runs the capture, not to a helper. One wrong message sent users to a nonexistent entry. | `check.sh` + unit test |
 | D8 | No dangling references | Every relative link and `src` in the shipped docs resolves to a file in the tree. Deleting a file must delete its references too; a shipped README once pointed at a removed script. | `check.sh` |
+| D9 | Product text carries no em-dash | ASD-STE style uses plain punctuation; the ban covers every shipped file (code strings, docs, scripts, workflows). The checker builds the character with printf so it never holds one itself. | `check.sh` |
 
 ## 6. Compliance snapshot
 
@@ -122,14 +123,14 @@ Audited 2026-10-16 against the running code (v0.1.0).
 
 | Area | Status | Note |
 |---|---|---|
-| V1, V2, V3, V4 | ok | Enforced by e2e, the unit suite, and `check.sh` (12 gates). |
+| V1, V2, V3, V4 | ok | Enforced by e2e, the unit suite, and `check.sh` (13 gates). |
 | V5 | ok | Every README figure traces to `docs/BENCHMARK.md`, which carries its own limitation list. |
-| V6, V7 | ok | Applied during the race-hardening pass; deferred items are recorded in the commit. The 0.1.0 pass fixed two root causes at the boundary: a crop that does not fit is refused instead of clamped, and the half-scale filter cannot ask for an odd width. |
+| V6, V7 | ok | Applied during the race-hardening pass; deferred items are recorded in the commit. The 0.1.0 pass fixed two root causes at the boundary: a crop below the usable floor is refused instead of clamped to 2×2, and the half-scale filter cannot ask for an odd width. |
 | B1, B2, B4, B5 | ok | Pure helpers own the geometry; the edges parse the inputs. |
 | B3, B8 | ok | `RecordState` is a two-shape union with `parsePidfile` as the tested seam; strict typecheck runs in CI. |
 | S1, S2, S3, S4 | ok | Hardened in this pass: safe runtime-file creation, absolute `ps`, fail-closed pidfile write. |
 | S5 | ok | `SKILL.md` declares its capability surface: what it runs, writes, reads, and signals. |
-| S6, S7, S8 | ok | No network, no telemetry, no eval, two copied files, zero dependencies. SkillSpector 2.12.0 static scan: risk score 0/100, zero findings, coverage 100%. Its own `CAUTION` label reflects a partial reference ledger (the skill references `pomulum.ts`, which appears only after `install.sh`), not a finding. |
+| S6, S7, S8 | ok | No network, no telemetry, no eval, two copied files, zero dependencies. SkillSpector 2.12.0 static scan (2026-11-11, pre-0.2.3): risk score 7/100, one MEDIUM finding (`RA2`), coverage 100%. Triage: false positive; the rule matched the token `plist` in the capability table, where `plutil` reads the host app's `Info.plist` for the TCC hint and writes nothing. The `CAUTION` label still reflects a partial reference ledger (`pomulum.ts` appears only after `install.sh`), not a finding. |
 | R1–R6 | ok | The last release used both review passes and produced severity-tagged findings. |
 | R7 | partial | CI gates every change on four runner combinations. Machine-readable reporting (JSON/SARIF) waits until something consumes it; the gates print text for a human. |
 | D1, D6, D8 | ok | Gate-enforced; D8 was added after deleting the logo generator left a reference behind. |
@@ -180,16 +181,16 @@ finding behind it and a reason to keep the behavior.
 
 1. **Done:** CI runs `check.sh` on four runner combinations, and a strict
    typecheck (B8).
-2. **Done:** B3 — `RecordState` is a discriminated union, `parsePidfile` is
+2. **Done:** B3 - `RecordState` is a discriminated union, `parsePidfile` is
    the tested seam, and the shape is validated at read time.
-3. **Done:** S5 — `SKILL.md` carries the capability declaration.
+3. **Done:** S5 - `SKILL.md` carries the capability declaration.
 4. **Done:** the skill package was scanned with SkillSpector 2.12.0
    (project-local environment, `--no-llm`): risk score 0/100, zero findings.
-   The scan also surfaced a packaging defect — the installed folder needed a
+   The scan also surfaced a packaging defect - the installed folder needed a
    module marker, or Node printed a warning on stderr for every command.
    Re-scan whenever the skill changes.
-5. **When a consumer exists:** R7 — emit the gate results as JSON/SARIF.
-6. **Done (0.1.0):** D7 — the TCC remedy is one constant, and the wrong
+5. **When a consumer exists:** R7 - emit the gate results as JSON/SARIF.
+6. **Done (0.1.0):** D7 - the TCC remedy is one constant, and the wrong
    phrasing fails the gate. The rule came from a shipped message that told
    users to grant Screen Recording to a helper tool.
 7. **Always:** keep R1 per release. Move every new rule into `check.sh` or
@@ -212,7 +213,7 @@ macOS-only CLI that ships an agent skill:
   privilege escalation, supply chain, excessive agency, tool poisoning, and
   least privilege), fail-closed gates, and the discipline of documenting a
   trust model. These inform S5–S8.
-- **[cursor/plugins — pstack](https://github.com/cursor/plugins/tree/main/pstack)**:
+- **[cursor/plugins - pstack](https://github.com/cursor/plugins/tree/main/pstack)**:
   the principle set (laziness-protocol, boundary-discipline,
   type-system-discipline, make-operations-idempotent, prove-it-works,
   fix-root-causes, test-behavior-not-implementation, explain-the-number,
@@ -236,7 +237,6 @@ scores against this register instead of re-arguing each term.
 - **M1 mnemonics**: "encode, do not remind"; "a rule that lives only in this
   file is a wish"; "make the flag lie"; "the contract wins"; "evidence, not
   silence"; "one pidfile, one truth"
-- the README **name story** ("What is in the name") and its wordplay
 - **"sweet spot"**: retired from prose and titles in the 2026-10-19 pass; if
   it returns, only as the bold verdict label in a result table
 

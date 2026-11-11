@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// pomulum — agent screen recorder CLI (v0, macOS)
+// pomulum - agent screen recorder CLI (v0, macOS)
 //
 // One file, no dependencies, no build step. Run it directly with Node >= 22.18
-// (type stripping — erasable types only; on older Node 22 pass
+// (type stripping - erasable types only; on older Node 22 pass
 // --experimental-strip-types). ffmpeg (avfoundation) does the
 // capture and the encode; this file only controls the process. The Screen
 // Recording permission belongs to the app that launches the capture (the
@@ -26,15 +26,17 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = "0.2.2";
+const VERSION = "0.2.3";
 
 // ─────────────────────────── types (erasable-only) ───────────────────────
 
@@ -89,7 +91,6 @@ function isExecutable(p: string): boolean {
 // ────────────────────────────── arg parsing ──────────────────────────────
 
 export type ParsedArgs = {
-  command: string;
   bools: Set<string>;
   values: Record<string, string>;
 };
@@ -100,7 +101,6 @@ export type ParsedArgs = {
  * (main converts it to exit code 2).
  */
 export function parseArgv(
-  command: string,
   argv: string[],
   allowed: Record<string, "bool" | "value">,
 ): ParsedArgs {
@@ -120,10 +120,10 @@ export function parseArgv(
     }
     const v = argv[++i];
     if (v === undefined) throw new UsageError(`${a} needs a value`);
-    if (v.startsWith("--")) throw new UsageError(`${a} needs a value — got the flag \`${v}\` instead`);
+    if (v.startsWith("--")) throw new UsageError(`${a} needs a value - got the flag \`${v}\` instead`);
     values[a] = v;
   }
-  return { command, bools, values };
+  return { bools, values };
 }
 
 // ─────────────────────────── crop utils (pure) ───────────────────────────
@@ -137,20 +137,23 @@ export function evenAligned(r: Crop): Crop {
 
 /** Convert "--crop x:y:w:h" to an even-aligned Crop. An incorrect format causes a UsageError. */
 export function parseCropSpec(spec: string): Crop {
-  const parts = spec.split(":").map(Number);
+  const parts = spec.split(":");
   if (
     parts.length !== 4 ||
-    parts.some((n) => !Number.isInteger(n)) ||
-    (parts[2] as number) <= 0 ||
-    (parts[3] as number) <= 0
+    // Number("") is 0 and Number("0x2") is 2: a typo must not become a coordinate
+    parts.some((p) => !/^-?\d+$/.test(p))
   ) {
     throw new UsageError("--crop must have the format x:y:w:h (integer numbers, pixels; w and h must be > 0)");
   }
+  const nums = parts.map(Number);
+  if ((nums[2] as number) <= 0 || (nums[3] as number) <= 0) {
+    throw new UsageError("--crop must have the format x:y:w:h (integer numbers, pixels; w and h must be > 0)");
+  }
   return evenAligned({
-    x: parts[0] as number,
-    y: parts[1] as number,
-    w: parts[2] as number,
-    h: parts[3] as number,
+    x: nums[0] as number,
+    y: nums[1] as number,
+    w: nums[2] as number,
+    h: nums[3] as number,
   });
 }
 
@@ -166,7 +169,7 @@ export function clampCrop(r: Crop, captureWidth: number, captureHeight: number):
 }
 
 /** Pure: did the clamp change the requested area? Agents get this as
- *  `cropClamped` in the JSON — a silently moved crop used to surface later
+ *  `cropClamped` in the JSON - a silently moved crop used to surface later
  *  as an encoder error instead of a coordinate error. */
 export function cropWasClamped(requested: Crop, applied: Crop): boolean {
   return (
@@ -189,8 +192,8 @@ export function cropUnusable(c: Crop, downscale: boolean): boolean {
 
 /** Pure: resolve the encode mode from the record flags. Since 0.2.0 full
  *  resolution is the default; `--half` opts into the 50% scale; `--small`
- *  is CRF 28 + half scale; and `--full-res` — kept so pre-0.2.0 commands
- *  keep their exact meaning — overrides the half scale of `--half` and
+ *  is CRF 28 + half scale; and `--full-res` - kept so pre-0.2.0 commands
+ *  keep their exact meaning - overrides the half scale of `--half` and
  *  `--small` (CRF 28 still applies). */
 export function resolveEncodeMode(
   flags: { fullRes: boolean; half: boolean; small: boolean },
@@ -230,7 +233,7 @@ function emitJsonOr(p: Parsed2, humanLine: string, payload: Record<string, unkno
 // between sessions. Never make the index permanent in the code.
 
 /** Parse the output of `ffmpeg -f avfoundation -list_devices true -i ""`.
- *  Pure function — unit tested with a fixture. Keep only names that start
+ *  Pure function - unit tested with a fixture. Keep only names that start
  *  with `Capture screen`. A probe of the face camera stops and waits for a
  *  permission that never comes (real defect, pitfall #3). The list command
  *  exits with code 251; this is normal. Trust the output only. */
@@ -283,9 +286,34 @@ export function ffprobeDims(t: Toolchain, file: string): { w: number; h: number 
   return { w: parts[0] as number, h: parts[1] as number };
 }
 
+/** Pure: the dimensions from a PNG IHDR header (the first chunk, fixed at
+ *  bytes 16-23), or null when the buffer is not a PNG. Snapshots and probes
+ *  are PNGs this process just wrote; reading the header answers in-process
+ *  and saves the ffprobe spawn (about 200 ms) on the hottest command. */
+export function pngDims(b: Buffer): Dim | null {
+  const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (b.length < 24 || !b.subarray(0, 8).equals(SIG)) return null;
+  const w = b.readUInt32BE(16);
+  const h = b.readUInt32BE(20);
+  if (!Number.isInteger(w) || w <= 0 || !Number.isInteger(h) || h <= 0) return null;
+  return { w, h };
+}
+
+/** Dimensions of an image file this run just wrote. A PNG answers from its
+ *  own header (no child process); any other format falls back to ffprobe. */
+function imageDims(t: Toolchain, file: string): Dim | null {
+  try {
+    const d = pngDims(readFileSync(file));
+    if (d !== null) return d;
+  } catch {
+    /* a missing or unreadable file falls through to ffprobe, which returns null */
+  }
+  return ffprobeDims(t, file);
+}
+
 /** The one source of truth for the Screen Recording remedy. macOS attributes
- *  the grant (TCC) to the app that LAUNCHES the capture — never to ffmpeg —
- *  so every message that offers the remedy builds on this sentence. Messages
+ *  the grant (TCC) to the app that LAUNCHES the capture, never to ffmpeg.
+ *  So every message that offers the remedy builds on this sentence. Messages
  *  used to drift (one of them told the user to check the permission "of
  *  ffmpeg"); a unit test and a `check.sh` gate now hold the line. */
 export const TCC_REMEDY =
@@ -318,23 +346,31 @@ export function tccHint(rc: number | null, stderr: string, hostBundleId?: string
   return `Hint: a capture that hangs or dies at once is usually a lost Screen Recording permission. ${TCC_REMEDY}${reset}`;
 }
 
+/** Pure: the ffmpeg arguments that grab ONE frame from a device. The snap
+ *  and the dimension probe are the same capture (only the cursor differs),
+ *  so one builder keeps the two argument lists from drifting apart. */
+export function frameCaptureArgs(deviceIndex: number, out: string, captureCursor: boolean): string[] {
+  const a = [
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-f", "avfoundation", "-framerate", "30", "-pixel_format", "nv12",
+  ];
+  if (captureCursor) a.push("-capture_cursor", "1");
+  a.push("-i", String(deviceIndex), "-frames:v", "1", "-update", "1", out);
+  return a;
+}
+
 /** Capture one frame from a device to get the real pixel dimensions
  *  (about 1-2 s). Kill with SIGKILL after a 12 s timeout. A probe must
  *  never block. */
 export function probeDeviceDims(t: Toolchain, deviceIndex: number): { w: number; h: number } {
   const tmp = join(tmpdir(), `pomulum-probe-${process.pid}-${deviceIndex}.png`);
   try {
-    const r = spawnSync(
-      t.ffmpeg,
-      [
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "avfoundation", "-framerate", "30", "-pixel_format", "nv12",
-        "-i", String(deviceIndex),
-        "-frames:v", "1", "-update", "1", tmp,
-      ],
-      { timeout: 12_000, killSignal: "SIGKILL", encoding: "utf8" },
-    );
-    const dims = existsSync(tmp) ? ffprobeDims(t, tmp) : null;
+    const r = spawnSync(t.ffmpeg, frameCaptureArgs(deviceIndex, tmp, false), {
+      timeout: 12_000,
+      killSignal: "SIGKILL",
+      encoding: "utf8",
+    });
+    const dims = existsSync(tmp) ? imageDims(t, tmp) : null;
     if (dims === null) {
       const stderr = (r.stderr ?? "").slice(0, 300);
       throw new RunError(
@@ -364,7 +400,7 @@ function devicesSignature(screens: ScreenDevice[], mics: MicDevice[]): string {
 }
 
 /** Pure: which screens still need a one-frame probe? The cache stores one
- *  entry per device, and `record` writes only the device it selected — a hit
+ *  entry per device, and `record` writes only the device it selected - a hit
  *  on the signature is NOT a promise that every device is in the map. A
  *  missing entry must be probed, never reported as `width: null` (the 0.1.1
  *  defect: `screens` after a single-device `record` on a cold cache). */
@@ -376,7 +412,23 @@ function readCache(signature: string): Record<string, Dim> | null {
   try {
     const c = JSON.parse(readFileSync(CACHE_FILE, "utf8")) as ScreenCache;
     if (c.version !== 1 || c.signature !== signature) return null;
-    if (Date.now() - c.ts > CACHE_TTL_MS) return null;
+    // A corrupt ts ("abc") gives NaN, a future ts (clock skew) never ages:
+    // both are corrupt, not fresh. Dims entries must be well-formed too.
+    const age = Date.now() - c.ts;
+    if (!Number.isFinite(age) || age < -60_000 || age > CACHE_TTL_MS) return null;
+    if (typeof c.dims !== "object" || c.dims === null) return null;
+    for (const d of Object.values(c.dims)) {
+      if (
+        typeof d !== "object" ||
+        d === null ||
+        !Number.isInteger((d as Dim).w) ||
+        !Number.isInteger((d as Dim).h) ||
+        (d as Dim).w <= 0 ||
+        (d as Dim).h <= 0
+      ) {
+        return null;
+      }
+    }
     return c.dims;
   } catch {
     return null;
@@ -420,6 +472,11 @@ const RECORD_FLAGS: Record<string, "bool" | "value"> = {
 const STOP_FLAGS: Record<string, "bool" | "value"> = { "--json": "bool" };
 const STATUS_FLAGS: Record<string, "bool" | "value"> = { "--json": "bool" };
 
+/** A pending pidfile older than this is a dead start (the whole start path
+ *  is bounded well under it: one 10 s list plus at most a 12 s probe). All
+ *  four readers of a pending claim apply the same rule. */
+export const PENDING_STALE_SEC = 60;
+
 /** Default time limit for record without --duration. An agent can stop
  *  in the middle of a task; ffmpeg must not fill the disk. Set
  *  `--max-duration 0` to remove the limit. */
@@ -436,9 +493,22 @@ export function effectiveDurationCap(
   return maxDurationSec > 0 ? maxDurationSec : null;
 }
 
-function parsePositiveNumber(flag: string, v: string): number {
+/** Pure: parse a flag value that must be a plain decimal number. Empty
+ *  strings, hex ("0x2"), exponents and whitespace are argument errors:
+ *  Number("") is 0 and Number("0x2") is 2, and a silent 0 can select the
+ *  wrong screen or remove the duration cap. A value too large for a
+ *  double (Infinity) is an argument error too, not a runtime error one
+ *  second later inside ffmpeg. */
+export function parseDecimal(flag: string, v: string): number {
+  if (!/^-?\d+(\.\d+)?$/.test(v)) throw new UsageError(`${flag} must be a number (decimal digits only, no hex or empty value)`);
   const n = Number(v);
-  if (!Number.isFinite(n) || n < 0) throw new UsageError(`${flag} must be a number >= 0`);
+  if (!Number.isFinite(n)) throw new UsageError(`${flag} is too large`);
+  return n;
+}
+
+function parsePositiveNumber(flag: string, v: string): number {
+  const n = parseDecimal(flag, v);
+  if (n < 0) throw new UsageError(`${flag} must be a number >= 0`);
   return n;
 }
 
@@ -467,7 +537,7 @@ export function appBundleRoot(execPath: string): string | null {
 }
 
 /** Walk the parent chain to the app bundle that hosts this process and read
- *  its bundle id — the TCC "responsible process" that owns the grant. Any
+ *  its bundle id - the TCC "responsible process" that owns the grant. Any
  *  failure returns undefined, and the remedy hint stays generic. Both
  *  helpers run by absolute path (no shell). */
 export function findHostAppBundleId(maxHops = 12): string | undefined {
@@ -502,11 +572,11 @@ export function findHostAppBundleId(maxHops = 12): string | undefined {
   return undefined;
 }
 
-/** `screens [--json] [--no-cache]` — list the avfoundation screens and
+/** `screens [--json] [--no-cache]` - list the avfoundation screens and
  *  microphones with their real pixel dimensions (one-frame probe, with a
  *  disk cache). */
 function cmdScreens(argv: string[]): number {
-  const a = parseArgv("screens", argv, SCREENS_FLAGS);
+  const a = parseArgv(argv, SCREENS_FLAGS);
   if (a.bools.has("--help")) {
     process.stdout.write("pomulum screens [--json] [--no-cache]\n");
     return 0;
@@ -524,11 +594,21 @@ function cmdScreens(argv: string[]): number {
 
   const dims: Record<string, Dim> = cached ? { ...cached } : {};
   // A cache hit covers only the devices the map actually stores (`record`
-  // writes one device at a time) — probe the rest instead of reporting null,
+  // writes one device at a time) - probe the rest instead of reporting null,
   // and write the completed map back.
   const missing = screensNeedingProbe(screens, dims);
-  for (const s of missing) dims[String(s.index)] = probeDeviceDims(t, s.index);
-  if (!noCache && missing.length > 0) writeCache(signature, dims);
+  const warnings: string[] = [];
+  for (const s of missing) {
+    try {
+      dims[String(s.index)] = probeDeviceDims(t, s.index);
+    } catch (e) {
+      // One dead display (a pulled HDMI cable can leave an enumerated ghost)
+      // must not fail the healthy ones. The failed device reports null dims
+      // WITH a warning; a record against it then fails with this same error.
+      warnings.push(`device [${s.index}] ${s.name}: ${(e as Error).message.split("\n")[0]}`);
+    }
+  }
+  if (!noCache && missing.length > warnings.length) writeCache(signature, dims);
   const fromCache = cached !== null && missing.length === 0;
   for (const s of screens) {
     const d = dims[String(s.index)];
@@ -541,9 +621,13 @@ function cmdScreens(argv: string[]): number {
     a,
     [
       `Capture devices (avfoundation):`,
-      ...screens.map((s) => `  [${s.index}] ${s.name} — ${s.width}×${s.height}${fromCache ? " (cache)" : ""}`),
+      ...screens.map(
+        (s) =>
+          `  [${s.index}] ${s.name} - ${s.width ?? "?"}×${s.height ?? "?"}${fromCache ? " (cache)" : ""}${s.width === null ? " (unavailable)" : ""}`,
+      ),
       `Mic:`,
       ...mics.map((m) => `  [${m.index}] ${m.name}`),
+      ...(warnings.length ? ["", ...warnings.map((w) => `  ⚠ ${w}`)] : []),
       ...(hint ? ["", `Screen permission: ${permission}.`, `Hint: ${hint}`] : []),
       ``,
       `Use: node pomulum.ts record --screen <index> [--crop x:y:w:h]`,
@@ -554,6 +638,7 @@ function cmdScreens(argv: string[]): number {
       screenPermission: permission,
       ...(hint ? { hint } : {}),
       cached: fromCache,
+      warnings,
       elapsedMs,
     },
   );
@@ -567,7 +652,7 @@ function requireToolchain(): Toolchain {
 }
 
 /** Pre-flight the output directory. The default output lives in ~/Desktop,
- *  which macOS guards with the "Files and Folders" permission — a denied
+ *  which macOS guards with the "Files and Folders" permission - a denied
  *  write kills ffmpeg about one second in, with a log that reads like a
  *  lost Screen Recording grant. Fail early with a clear message instead.
  *  A folder that does not exist and a folder that is denied are different
@@ -585,7 +670,7 @@ export function requireWritableDir(file: string): void {
       );
     }
     throw new RunError(
-      `Cannot write to ${dir} — macOS may deny this folder (Files & Folders permission). ` +
+      `Cannot write to ${dir} - macOS may deny this folder (Files & Folders permission). ` +
         `Pass --out with a writable path, for example /tmp/${basename(file)}`,
     );
   }
@@ -599,10 +684,10 @@ export function requireWritableDir(file: string): void {
 export function selectScreen(screens: ScreenDevice[], screenFlag: string | undefined): ScreenDevice {
   if (screens.length === 0)
     throw new RunError(
-      `No capture device found. Connect a display — if one is already connected, ${TCC_REMEDY}`,
+      `No capture device found. Connect a display - if one is already connected, ${TCC_REMEDY}`,
     );
   if (screenFlag !== undefined) {
-    const idx = Number(screenFlag);
+    const idx = parseDecimal("--screen", screenFlag);
     if (!Number.isInteger(idx) || idx < 0) throw new UsageError("--screen must be an integer >= 0");
     const dev = screens.find((s) => s.index === idx);
     if (!dev) {
@@ -622,9 +707,19 @@ function resolveScreenDevice(t: Toolchain, screenFlag: string | undefined): Scre
   return selectScreen(screens, screenFlag);
 }
 
+/** Pure: the default microphone. Continuity devices (an iPhone or iPad that
+ *  links itself through a nearby Mac) are real microphones in the
+ *  avfoundation list, but almost never the one the caller meant, so the
+ *  default skips them. v0 has no mic picker; the JSON names the mic that
+ *  was picked, so the boundary stays visible. */
+export function pickDefaultMic(mics: MicDevice[]): MicDevice | null {
+  const local = mics.find((m) => !/^(iPhone|iPad|Apple TV|Apple Vision Pro)/i.test(m.name));
+  return local ?? mics[0] ?? null;
+}
+
 /** Get the dimensions of a device. Read the cache first (M2), then probe on
  *  a miss. `signature` comes from the same listDevices run that selected
- *  the device — this function does not list the devices again. With
+ *  the device - this function does not list the devices again. With
  *  `persist = false` (a dry run) it reads and probes but writes nothing:
  *  a dry run has no disk side effects. */
 function deviceDims(t: Toolchain, dev: ScreenDevice, signature: string, persist = true): Dim {
@@ -636,13 +731,13 @@ function deviceDims(t: Toolchain, dev: ScreenDevice, signature: string, persist 
   return d; // so the next record does not probe again
 }
 
-/** `snap [--out F] [--screen N]` — capture one native-resolution PNG frame
+/** `snap [--out F] [--screen N]` - capture one native-resolution PNG frame
  *  from a device. This is the "eye" of the agent: it reads the snap to
  *  select the crop. The pixel coordinates of the snap equal the pixel
  *  coordinates of the record capture frame (proven by the M3 benchmark).
  *  There is NO coordinate conversion step (guardrail #5). */
 function cmdSnap(argv: string[]): number {
-  const a = parseArgv("snap", argv, SNAP_FLAGS);
+  const a = parseArgv(argv, SNAP_FLAGS);
   if (a.bools.has("--help")) {
     process.stdout.write("pomulum snap [--out F.png] [--screen N] [--json]\n");
     return 0;
@@ -652,21 +747,15 @@ function cmdSnap(argv: string[]): number {
   const dev = resolveScreenDevice(t, a.values["--screen"]);
   const out = a.values["--out"] ?? join(tmpdir(), `pomulum-snap-${asciiTimestamp()}.png`);
   requireWritableDir(out);
-  const r = spawnSync(
-    t.ffmpeg,
-    [
-      "-hide_banner", "-loglevel", "error", "-y",
-      "-f", "avfoundation", "-framerate", "30", "-pixel_format", "nv12",
-      "-capture_cursor", "1",
-      "-i", String(dev.index),
-      "-frames:v", "1", "-update", "1", out,
-    ],
-    { timeout: 12_000, killSignal: "SIGKILL", encoding: "utf8" },
-  );
+  const r = spawnSync(t.ffmpeg, frameCaptureArgs(dev.index, out, true), {
+    timeout: 12_000,
+    killSignal: "SIGKILL",
+    encoding: "utf8",
+  });
   // Trust only a clean ffmpeg exit: a pre-existing file must never be
   // reported as THIS run's success (e.g. an old image after the TCC grant
   // was lost).
-  const dims = r.status === 0 && existsSync(out) ? ffprobeDims(t, out) : null;
+  const dims = r.status === 0 && existsSync(out) ? imageDims(t, out) : null;
   if (dims === null) {
     const stderr = (r.stderr ?? "").slice(0, 300);
     throw new RunError(`Snap failed (rc=${r.status}): ${stderr} ${tccHint(r.status, stderr, findHostAppBundleId())}`.trimEnd());
@@ -674,7 +763,7 @@ function cmdSnap(argv: string[]): number {
   const elapsedMs = Math.round(performance.now() - t0);
   emitJsonOr(
     a,
-    `Snap: ${out} — ${dims.w}×${dims.h} (device [${dev.index}] ${dev.name}, ${elapsedMs}ms)`,
+    `Snap: ${out} - ${dims.w}×${dims.h} (device [${dev.index}] ${dev.name}, ${elapsedMs}ms)`,
     {
       out,
       device: { index: dev.index, name: dev.name },
@@ -712,7 +801,7 @@ export function inputSpec(o: EncodeOpts): string {
  *  test ties them together.
  *
  *  Why not `scale=iw/2:-2`: that only guards the height. A crop 18 px wide
- *  asked for a 9 px frame, and libx264 cannot open yuv420p at an odd width —
+ *  asked for a 9 px frame, and libx264 cannot open yuv420p at an odd width;
  *  the recording died with "Could not open encoder before EOF" (real defect,
  *  found before the first release). Flooring each axis to an even size costs at
  *  pixel per axis and keeps the promise exact. */
@@ -726,15 +815,15 @@ export function videoFilter(o: EncodeOpts): string | null {
 }
 
 /** Pure: the encoded frame size for a crop (or the full frame). Mirrors
- *  HALF_SCALE_FILTER — floor each axis to the nearest even number of
+ *  HALF_SCALE_FILTER - floor each axis to the nearest even number of
  *  half-pixels. Must stay in step with videoFilter(). */
 export function scaledDims(w: number, h: number, downscale: boolean): Dim {
   if (!downscale) return { w, h };
   return { w: Math.trunc(w / 4) * 2, h: Math.trunc(h / 4) * 2 };
 }
 
-/** ffmpeg arguments — the encode sweet spot (docs/BENCHMARK.md): libx264
- *  veryfast CRF 26, yuv420p, aac 96k, +faststart. Pure function — tested
+/** ffmpeg arguments - the encode sweet spot (docs/BENCHMARK.md): libx264
+ *  veryfast CRF 26, yuv420p, aac 96k, +faststart. Pure function - tested
  *  with golden tests. */
 export function buildFfmpegArgs(o: EncodeOpts, output: string): string[] {
   const a = [
@@ -762,7 +851,7 @@ export function buildFfmpegArgs(o: EncodeOpts, output: string): string[] {
 const PIDFILE = "/tmp/pomulum-rec.pid";
 const FFMPEG_LOG = "/tmp/pomulum-ffmpeg.log";
 
-/** The pidfile holds exactly one of two shapes. "ended" is never stored — it
+/** The pidfile holds exactly one of two shapes. "ended" is never stored - it
  *  is derived (a recording whose pid is gone). There are no optional fields:
  *  an illegal state must not be representable. */
 export type PendingState = {
@@ -782,12 +871,13 @@ export type RecordingState = {
   device: { index: number; name: string; width: number; height: number };
   crop: Crop | null;
   mic: number | null;
+  micName?: string; // present only when a mic is recorded; makes the boundary visible in `status`
   capSec: number | null; // the -t limit ffmpeg stops at on its own; null = none
 };
 
 export type RecordState = PendingState | RecordingState;
 
-/** Parse pidfile JSON into a known state. Pure — this is the test surface for
+/** Parse pidfile JSON into a known state. Pure - this is the test surface for
  *  the pidfile format. Anything else throws: a corrupt file and an
  *  unrecognized shape must not look like "no recording". */
 export function parsePidfile(raw: string): RecordState {
@@ -836,6 +926,7 @@ export function parsePidfile(raw: string): RecordState {
       },
       crop: (o.crop ?? null) as Crop | null,
       mic: typeof o.mic === "number" ? o.mic : null,
+      ...(typeof o.micName === "string" ? { micName: o.micName } : {}),
       capSec: typeof o.capSec === "number" && o.capSec > 0 ? o.capSec : null,
     };
   }
@@ -843,7 +934,7 @@ export function parsePidfile(raw: string): RecordState {
 }
 
 /** Read the pidfile. null = no pidfile (ENOENT). A corrupt or unrecognized
- *  file is a distinct runtime error — a missing file and a broken file must
+ *  file is a distinct runtime error - a missing file and a broken file must
  *  not look the same to the agent. */
 export function readPidfile(): RecordState | null {
   let raw: string;
@@ -857,20 +948,25 @@ export function readPidfile(): RecordState | null {
 }
 
 /** Create the pending claim exclusively (the "wx" flag = O_EXCL). False when
- *  it already exists — the caller then decides between a live recording
+ *  it already exists - the caller then decides between a live recording
  *  (error) and a stale file (remove and claim again). This closes the
- *  check-then-write race between two concurrent `record` calls. */
+ *  check-then-write race between two concurrent `record` calls. Any other
+ *  write failure (a full /tmp, a foreign-owned file) is itself a runtime
+ *  error: it must not masquerade as "lost the race". */
 export function claimPidfile(state: PendingState): boolean {
   try {
     writeFileSync(PIDFILE, JSON.stringify(state, null, 2), { flag: "wx", mode: 0o600 });
     return true;
-  } catch {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw new RunError(`Cannot create the pidfile ${PIDFILE}: ${(e as Error).message}`);
+    }
     return false;
   }
 }
 
 /** Create a runtime file safely in a world-writable directory. A leftover
- *  entry — for example a symlink planted in /tmp — must never redirect our
+ *  entry - for example a symlink planted in /tmp - must never redirect our
  *  write: remove it first, then create the file with O_EXCL and mode 0600
  *  (CWE-59 link following / CWE-377 insecure temp file). */
 function createRuntimeFile(path: string): number {
@@ -878,17 +974,26 @@ function createRuntimeFile(path: string): number {
   return openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
 }
 
-/** Replace the pidfile with the live state. Same discipline as the claim:
- *  never follow a leftover symlink, keep the file private. Throws on
- *  failure — the caller must then fail closed and kill the recording. */
+/** Replace the pidfile with the live state. Atomic: the state goes to a
+ *  private temp file (O_EXCL, mode 0600) and a rename replaces the pidfile;
+ *  rename does not follow a symlink at the target. The old rm-then-create
+ *  had a gap with no pidfile at all, wide enough for a second `record` to
+ *  claim while this starter was still upgrading its own claim. Throws on
+ *  failure: the caller must then fail closed and kill the recording. */
 function writePidfile(state: RecordingState): void {
-  rmSync(PIDFILE, { force: true });
-  writeFileSync(PIDFILE, JSON.stringify(state, null, 2), { flag: "wx", mode: 0o600 });
+  const tmp = `${PIDFILE}.new`;
+  const fd = createRuntimeFile(tmp);
+  try {
+    writeSync(fd, JSON.stringify(state, null, 2));
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, PIDFILE);
 }
 
 /** Is the pid alive? (EPERM = alive, but not our process.) Guards against
  *  pid <= 0: kill(0) would signal the caller's whole process group, and a
- *  negative pid means "every process we may signal" — never use them. */
+ *  negative pid means "every process we may signal" - never use them. */
 export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -899,11 +1004,24 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+/** Is the process GROUP alive? The group outlives its leader: a lingering
+ *  member keeps the group id valid, so `kill(-pgid, sig)` still reaches
+ *  it. Same guard as pidAlive: a pgid <= 0 must never be signalled. */
+export function groupAlive(pgid: number): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /** Pure: does a command line look like a pomulum recorder? The recorder is
  *  identified by TWO markers: the avfoundation capture AND the inert
  *  `-metadata comment=pomulum-recording` argument (see buildFfmpegArgs). A
- *  foreign avfoundation capture — or pomulum's own short-lived snap/screens
- *  probe — must not match. `stop` must never signal a process group it
+ *  foreign avfoundation capture - or pomulum's own short-lived snap/screens
+ *  probe - must not match. `stop` must never signal a process group it
  *  cannot positively identify. */
 export function looksLikeOurRecorder(commandLine: string): boolean {
   return commandLine.includes("avfoundation") && commandLine.includes("pomulum-recording");
@@ -915,24 +1033,45 @@ export function pidIsOurs(pid: number): boolean {
   return looksLikeOurRecorder((r.stdout ?? "").trim());
 }
 
+/** Pure: parse `pgrep -g <pgid> -l -f` output into pid + command pairs. */
+export function parsePgrepLines(raw: string): Array<{ pid: number; command: string }> {
+  const out: Array<{ pid: number; command: string }> = [];
+  for (const line of raw.split("\n")) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (m) out.push({ pid: Number(m[1]), command: (m[2] ?? "").trim() });
+  }
+  return out;
+}
+
+/** The members of a process group, as pid + command pairs. pgrep runs by
+ *  absolute path, the same discipline as ps: process identity must not
+ *  depend on PATH. */
+export function groupMembers(pgid: number): Array<{ pid: number; command: string }> {
+  const r = spawnSync("/usr/bin/pgrep", ["-g", String(pgid), "-l", "-f"], { encoding: "utf8", timeout: 3000 });
+  return parsePgrepLines(r.stdout ?? "");
+}
+
 /** Synchronous sleep for this single-threaded CLI. Atomics.wait is the standard node sleep. */
 function nap(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function waitForExit(pid: number, ms: number): boolean {
+/** Wait for the process GROUP to end. The leader is ffmpeg itself (the
+ *  spawned pid execs into it); the caffeinate supervisor is its child and
+ *  follows it out, so the group ends with the capture. */
+function waitForExit(pgid: number, ms: number): boolean {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
-    if (!pidAlive(pid)) return true;
+    if (!groupAlive(pgid)) return true;
     nap(100);
   }
-  return !pidAlive(pid);
+  return !groupAlive(pgid);
 }
 
-function logTail(n = 500): string {
+function logTail(): string {
   try {
     const s = readFileSync(FFMPEG_LOG, "utf8").trim();
-    return s.slice(-n);
+    return s.slice(-500);
   } catch {
     return "(log is empty)";
   }
@@ -948,7 +1087,7 @@ function fileSize(path: string): number {
 }
 
 /** Is the output still growing? A growing file means ffmpeg is finalizing
- *  (the +faststart moov rewrite scales with the file size), not stuck — a
+ *  (the +faststart moov rewrite scales with the file size), not stuck - a
  *  SIGKILL there would truncate the trailer and leave an unprobeable file. */
 function stillGrowing(path: string): boolean {
   const before = fileSize(path);
@@ -960,10 +1099,18 @@ function stillGrowing(path: string): boolean {
  * Stop a recording. Send SIGINT to the full process group (caffeinate
  * supervisor + ffmpeg). ffmpeg then ends by itself and writes the moov atom
  * (+faststart needs the trailer). Wait 8 s for SIGINT, then escalate to
- * SIGTERM (wait 3 s) and finally SIGKILL (wait 2 s) — P5: ffmpeg blocked in
+ * SIGTERM (wait 3 s) and finally SIGKILL (wait 2 s) - P5: ffmpeg blocked in
  * avfoundation-init ignores SIGTERM; SIGKILL is final. ffmpeg exits with
  * rc=255 on SIGINT. This is normal. The caller verifies the result with
  * ffprobe.
+ *
+ * The process GROUP is the stop unit. The spawned pid execs from
+ * caffeinate into ffmpeg and stays the group leader; a caffeinate
+ * supervisor child runs beside it (verified live with ps: leader = ffmpeg,
+ * supervisor = its child). When the leader is gone but the group lives (a
+ * lingering supervisor, or a reused pid leading a foreign group), the code
+ * asks pgrep for EVIDENCE first: only a group that still contains a
+ * positively identified member gets a signal.
  *
  * Before SIGKILL the escalation asks for EVIDENCE that the process is stuck:
  * while the output file keeps growing (up to 5 more seconds) ffmpeg is
@@ -971,17 +1118,22 @@ function stillGrowing(path: string): boolean {
  * wedged, and only then is SIGKILL the right tool.
  *
  * `signaled` is false when nothing was signalled (the pid had already
- * exited — labelled "already-exited" because "natural duration end" and
+ * exited - labelled "already-exited" because "natural duration end" and
  * "crash" cannot be distinguished here) or when every kill failed (e.g.
- * EPERM on a foreign-user pidfile in sticky /tmp) — the caller must then
+ * EPERM on a foreign-user pidfile in sticky /tmp) - the caller must then
  * keep the pidfile instead of assuming the recording is gone.
  */
 export function stopRecording(state: RecordingState): {
   stoppedBy: "already-exited" | "SIGINT" | "SIGTERM" | "SIGKILL" | "stale";
   signaled: boolean;
 } {
-  if (!pidAlive(state.pid)) return { stoppedBy: "already-exited", signaled: false };
-  if (!pidIsOurs(state.pid)) return { stoppedBy: "stale", signaled: false };
+  if (pidAlive(state.pid)) {
+    if (!pidIsOurs(state.pid)) return { stoppedBy: "stale", signaled: false };
+  } else if (!groupAlive(state.pid)) {
+    return { stoppedBy: "already-exited", signaled: false };
+  } else if (!groupMembers(state.pid).some((m) => looksLikeOurRecorder(m.command))) {
+    return { stoppedBy: "stale", signaled: false };
+  }
   let signalError: Error | null = null;
   const killGroup = (sig: NodeJS.Signals): void => {
     try {
@@ -1096,16 +1248,16 @@ function shellQuote(s: string): string {
 }
 
 function cmdRecord(argv: string[]): number {
-  const a = parseArgv("record", argv, RECORD_FLAGS);
+  const a = parseArgv(argv, RECORD_FLAGS);
   if (a.bools.has("--help")) {
-    process.stdout.write("pomulum record [--crop x:y:w:h] [--screen N] [--duration N]\n                     [--out F] [--no-mic] [--half] [--full-res] [--small] [--dry-run] [--json]\n");
+    process.stdout.write("pomulum record [--crop x:y:w:h] [--screen N] [--duration N]\n                     [--max-duration N] [--out F] [--no-mic] [--half] [--full-res] [--small] [--dry-run] [--json]\n");
     return 0;
   }
   const t = requireToolchain();
   const out = a.values["--out"] ?? join(homedir(), "Desktop", `pomulum-${asciiTimestamp()}.mp4`);
 
   // ── The pidfile claim comes FIRST, before any ffmpeg work. A concurrent
-  // record then fails at the claim and never spawns anything — no orphaned
+  // record then fails at the claim and never spawns anything - no orphaned
   // capture, no second writer on the same output file, no truncated log.
   // Crash-safety: a crash after the claim leaves a recoverable pidfile; a
   // crash before it cannot leak a process.
@@ -1118,26 +1270,32 @@ function cmdRecord(argv: string[]): number {
   if (prev) {
     if (prev.state === "pending") {
       const ageSec = (Date.now() - Date.parse(prev.startedAt)) / 1000;
-      if (ageSec < 60) {
+      if (ageSec < PENDING_STALE_SEC) {
         throw new RunError(
           `Another record command is starting (pidfile pending for ${Math.round(ageSec)} s). Try again in a moment.`,
         );
       }
-      rmSync(PIDFILE, { force: true }); // a start that died before its spawn — stale
+      rmSync(PIDFILE, { force: true }); // a start that died before its spawn - stale
     } else if (pidAlive(prev.pid) && pidIsOurs(prev.pid)) {
       throw new RunError(`A recording is in progress (pid ${prev.pid}, output ${prev.output}). Run \`stop\` first.`);
     } else {
-      rmSync(PIDFILE, { force: true }); // stale pidfile (dead or foreign pid) — re-claim below
+      rmSync(PIDFILE, { force: true }); // stale pidfile (dead or foreign pid) - re-claim below
     }
   }
   const pending: PendingState = { state: "pending", output: out, startedAt: new Date().toISOString() };
   if (!claimPidfile(pending)) {
     // Lost the claim race (another starter appeared between the pre-check
-    // and the claim). Never fall back to a plain write — that would drop
+    // and the claim). Never fall back to a plain write - that would drop
     // the exclusive-create discipline.
     const other = readPidfile();
+    // Same liveness rule as the pre-check above: a pending claim counts as
+    // live only inside its 60 s start window, a recording only with a live,
+    // positively identified pid.
     const otherLive =
-      other !== null && (other.state === "pending" || (pidAlive(other.pid) && pidIsOurs(other.pid)));
+      other !== null &&
+      (other.state === "recording"
+        ? pidAlive(other.pid) && pidIsOurs(other.pid)
+        : Date.now() - Date.parse(other.startedAt) < PENDING_STALE_SEC * 1000);
     if (otherLive) {
       throw new RunError(`A recording is in progress (output ${other?.output}). Run \`stop\` first.`);
     }
@@ -1161,7 +1319,7 @@ function cmdRecord(argv: string[]): number {
     // The crop is reported as the pair (requested, applied): a clamp that
     // moves or shrinks the area is a fact the caller must see, never a
     // silent correction. A crop the clamp cut below the usable floor is a
-    // coordinate bug — fail here (exit 2) rather than one second later
+    // coordinate bug - fail here (exit 2) rather than one second later
     // inside libx264 ("Could not open encoder before EOF").
     const { downscale, crf } = resolveEncodeMode({
       fullRes: a.bools.has("--full-res"),
@@ -1187,12 +1345,13 @@ function cmdRecord(argv: string[]): number {
     const expectH = encoded.h;
     const expectedDims = { w: expectW, h: expectH };
 
-    const mic: number | null =
-      !a.bools.has("--no-mic") && mics.length > 0 ? (mics[0] as MicDevice).index : null;
+    const micDevice = a.bools.has("--no-mic") ? null : pickDefaultMic(mics);
+    const mic: number | null = micDevice !== null ? micDevice.index : null;
+    const micName: string | null = micDevice !== null ? micDevice.name : null;
 
     let durationSec: number | null = null;
     if (a.values["--duration"] !== undefined) {
-      durationSec = Number(a.values["--duration"]);
+      durationSec = parseDecimal("--duration", a.values["--duration"]);
       if (!Number.isFinite(durationSec) || durationSec <= 0) throw new UsageError("--duration must be a number > 0");
     }
     let maxDurationSec: number | null = null;
@@ -1231,6 +1390,7 @@ function cmdRecord(argv: string[]): number {
           cropClamped,
           expectedDims,
           mic,
+          ...(micName !== null ? { micName } : {}),
           dims,
           durationSec,
           maxDurationSec,
@@ -1260,6 +1420,10 @@ function cmdRecord(argv: string[]): number {
       closeSync(logFd); // the child holds its own copy of the fd; the parent can close it
     }
     child.unref();
+    // A detached spawn that fails asynchronously emits 'error' with no
+    // listener (an uncaught-exception stack after the clean error). The
+    // reporting paths below already own the message; swallow the event.
+    child.on("error", () => {});
 
     // Upgrade the claim to the real state IMMEDIATELY (before the liveness
     // wait): if this CLI dies during the wait, stop/status/record still see
@@ -1278,12 +1442,13 @@ function cmdRecord(argv: string[]): number {
       device: { index: dev.index, name: dev.name, width: dims.w, height: dims.h },
       crop,
       mic,
+      ...(micName !== null ? { micName } : {}),
       capSec,
     };
     try {
       writePidfile(state);
     } catch (e) {
-      // The recording is live but untrackable — fail closed: kill it rather
+      // The recording is live but untrackable - fail closed: kill it rather
       // than leave a capture that status/stop can never find.
       try {
         process.kill(-childPid, "SIGKILL");
@@ -1294,13 +1459,14 @@ function cmdRecord(argv: string[]): number {
         `Cannot write the pidfile ${PIDFILE} (${(e as Error).message}). The recording was aborted.`,
       );
     }
-    claimed = false; // a live recording exists now — the pidfile must survive any error below
+    claimed = false; // a live recording exists now - the pidfile must survive any error below
 
     // Wait a moment to catch an immediate failure (broken device, lost TCC).
-    nap(900);
+    // Short steps: a start that died at once reports after 300 ms, not 900.
+    for (let i = 0; i < 3 && pidAlive(childPid); i++) nap(300);
     if (!pidAlive(childPid)) {
       const tail = logTail();
-      rmSync(PIDFILE, { force: true }); // nothing is recording — do not leave a stale state
+      rmSync(PIDFILE, { force: true }); // nothing is recording - do not leave a stale state
       throw new RunError(`ffmpeg stopped immediately after it started. Log: ${tail} ${tccHint(1, tail)}`.trimEnd());
     }
 
@@ -1309,8 +1475,8 @@ function cmdRecord(argv: string[]): number {
       [
         `● Recording → ${out}`,
         `  device [${dev.index}] ${dev.name} ${dims.w}×${dims.h}${crop ? ` · crop ${crop.x}:${crop.y}:${crop.w}:${crop.h}${cropClamped ? ` (clamped from ${requestedCrop?.x}:${requestedCrop?.y}:${requestedCrop?.w}:${requestedCrop?.h})` : ""}` : " · full screen"}`,
-        `  estimated size ${expectW}×${expectH}${opts.downscale ? " (half scale)" : ""}${mic !== null ? " · mic" : " · no audio"}`,
-        `  stop with: node pomulum.ts stop${capSec !== null ? ` (auto-stop after ${capSec}s${durationSec === null ? " — max-duration limit" : ""})` : " (no limit)"}`,
+        `  estimated size ${expectW}×${expectH}${opts.downscale ? " (half scale)" : ""}${mic !== null ? ` · mic ${micName}` : " · no audio"}`,
+        `  stop with: node pomulum.ts stop${capSec !== null ? ` (auto-stop after ${capSec}s${durationSec === null ? " - max-duration limit" : ""})` : " (no limit)"}`,
       ].join("\n"),
       {
         started: true,
@@ -1322,6 +1488,7 @@ function cmdRecord(argv: string[]): number {
         requestedCrop,
         cropClamped,
         mic,
+        ...(micName !== null ? { micName } : {}),
         expectedDims,
         durationSec,
         maxDurationSec,
@@ -1338,7 +1505,7 @@ function cmdRecord(argv: string[]): number {
 // ───────────────────────────── stop ──────────────────────────────────────
 
 function cmdStop(argv: string[]): number {
-  const a = parseArgv("stop", argv, STOP_FLAGS);
+  const a = parseArgv(argv, STOP_FLAGS);
   if (a.bools.has("--help")) {
     process.stdout.write("pomulum stop [--json]\n");
     return 0;
@@ -1348,11 +1515,18 @@ function cmdStop(argv: string[]): number {
   if (!state) throw new RunError("No recording is in progress (no pidfile /tmp/pomulum-rec.pid).");
   if (state.state === "pending") {
     const ageSec = Math.round((Date.now() - Date.parse(state.startedAt)) / 1000);
-    rmSync(PIDFILE, { force: true }); // nothing was ever spawned — the claim is meaningless
+    if (ageSec >= PENDING_STALE_SEC) {
+      rmSync(PIDFILE, { force: true }); // the start died before its spawn - nothing can follow it
+      throw new RunError(
+        `A record start went stale (pending for ${ageSec} s, no spawn happened) - pidfile removed, nothing to verify.`,
+      );
+    }
+    // A fresh claim is still owned by a starting `record` (claim → probe →
+    // spawn → upgrade takes seconds). Removing it here would let the
+    // starter's upgrade resurrect a live recording AFTER this stop said
+    // none exists. Keep the file; the starter replaces or releases it.
     throw new RunError(
-      ageSec < 60
-        ? `A record command is still starting (pidfile pending for ${ageSec} s) — no recording to stop yet.`
-        : `A record start went stale (pending for ${ageSec} s, no spawn happened) — pidfile removed, nothing to verify.`,
+      `A record command is still starting (pidfile pending for ${ageSec} s) - no recording to stop yet. Try again in a moment.`,
     );
   }
 
@@ -1362,9 +1536,9 @@ function cmdStop(argv: string[]): number {
   const res = stopRecording(state);
   if (res.stoppedBy !== "already-exited" && res.stoppedBy !== "stale" && !res.signaled) {
     // Every kill attempt failed (e.g. a foreign-user pidfile in sticky
-    // /tmp). Keep the pidfile — the recording may still be live.
+    // /tmp). Keep the pidfile - the recording may still be live.
     throw new RunError(
-      `Cannot signal the process group of pid ${state.pid} (permission denied). The pidfile is kept — remove ${PIDFILE} manually only if you are sure no recording is live.`,
+      `Cannot signal the process group of pid ${state.pid} (permission denied). The pidfile is kept - remove ${PIDFILE} manually only if you are sure no recording is live.`,
     );
   }
   rmSync(PIDFILE, { force: true });
@@ -1372,7 +1546,31 @@ function cmdStop(argv: string[]): number {
   // Verify the artifact. Do not trust the exit code (rc=255 on SIGINT is normal).
   const info = ffprobeVerify(t, state.output);
   if (res.stoppedBy === "stale" && !info) {
-    throw new RunError(`Stale pidfile (pid ${state.pid} is not pomulum) and the output ${state.output} is not readable — ignored.`);
+    throw new RunError(`Stale pidfile (pid ${state.pid} is not pomulum) and the output ${state.output} is not readable - ignored.`);
+  }
+  if (res.stoppedBy === "stale") {
+    // Nothing was stopped: the pid belonged to a foreign process. Report the
+    // earlier file's facts without the success envelope - "stopped: true"
+    // for a recording this command never signalled would be a lie.
+    emitJsonOr(
+      a,
+      [
+        `Stale pidfile removed (pid ${state.pid} was not a pomulum recording).`,
+        `  Earlier output: ${state.output}`,
+        ...(info
+          ? [`   ${info.width}×${info.height} · ${info.durationSeconds.toFixed(1)}s · ${(info.bytes / 1048576).toFixed(2)} MB`]
+          : []),
+      ].join("\n"),
+      {
+        stopped: false,
+        stale: true,
+        stoppedBy: res.stoppedBy,
+        pid: state.pid,
+        output: state.output,
+        ...(info ? { verified: info } : {}),
+      },
+    );
+    return 0;
   }
   if (!info || info.durationSeconds <= 0.5 || info.bytes <= 0) {
     const tail = logTail();
@@ -1430,12 +1628,13 @@ function cmdStop(argv: string[]): number {
 
 // ───────────────────────────── status ────────────────────────────────────
 
-/** `status [--json]` — the agent asks: is a recording in progress, what
- *  does it record, and for how long? The command always exits with 0
- *  (a state is not an error). It reads the pidfile and does not touch
- *  ffmpeg. */
+/** `status [--json]` - the agent asks: is a recording in progress, what
+ *  does it record, and for how long? Exits 0 for every pidfile state
+ *  (a state is not an error). A corrupt pidfile is a runtime error
+ *  (exit 1): corrupt and missing must not look the same to the agent.
+ *  It reads the pidfile and does not touch ffmpeg. */
 function cmdStatus(argv: string[]): number {
-  const a = parseArgv("status", argv, STATUS_FLAGS);
+  const a = parseArgv(argv, STATUS_FLAGS);
   if (a.bools.has("--help")) {
     process.stdout.write("pomulum status [--json]\n");
     return 0;
@@ -1450,7 +1649,7 @@ function cmdStatus(argv: string[]): number {
   }
   if (state.state === "pending") {
     const ageSec = Math.round((Date.now() - Date.parse(state.startedAt)) / 1000);
-    if (ageSec < 60) {
+    if (ageSec < PENDING_STALE_SEC) {
       emitJsonOr(a, `● A record command is starting (${ageSec} s) → ${state.output}`, {
         recording: false,
         starting: true,
@@ -1458,7 +1657,7 @@ function cmdStatus(argv: string[]): number {
         output: state.output,
       });
     } else {
-      emitJsonOr(a, `Not recording — a record start went stale (${ageSec} s, no spawn happened).`, {
+      emitJsonOr(a, `Not recording - a record start went stale (${ageSec} s, no spawn happened).`, {
         recording: false,
         starting: false,
         stale: true,
@@ -1469,11 +1668,15 @@ function cmdStatus(argv: string[]): number {
     }
     return 0;
   }
-  const alive = pidAlive(state.pid) && pidIsOurs(state.pid);
+  // A recording is live while its GROUP is live and positively ours: the
+  // caffeinate leader can die while ffmpeg still records.
+  const alive = pidAlive(state.pid)
+    ? pidIsOurs(state.pid)
+    : groupAlive(state.pid) && groupMembers(state.pid).some((m) => looksLikeOurRecorder(m.command));
   if (!alive) {
     emitJsonOr(
       a,
-      `Not recording — but the pidfile is present (pid ${state.pid} ended). Run \`stop\` to verify and clean up: output ${state.output}`,
+      `Not recording - but the pidfile is present (pid ${state.pid} ended). Run \`stop\` to verify and clean up: output ${state.output}`,
       {
         recording: false,
         pidfilePresent: true,
@@ -1495,7 +1698,7 @@ function cmdStatus(argv: string[]): number {
   emitJsonOr(
     a,
     [
-      `● Recording — ${Math.floor(elapsedSec / 60)}m${String(Math.floor(elapsedSec % 60)).padStart(2, "0")}s · ${(bytes / 1048576).toFixed(1)} MB`,
+      `● Recording - ${Math.floor(elapsedSec / 60)}m${String(Math.floor(elapsedSec % 60)).padStart(2, "0")}s · ${(bytes / 1048576).toFixed(1)} MB`,
       `  → ${state.output}`,
       `  pid ${state.pid} · device [${state.device.index}] ${state.device.name} · crop ${state.crop ? `${state.crop.x}:${state.crop.y}:${state.crop.w}:${state.crop.h}` : "full screen"}`,
     ].join("\n"),
@@ -1508,6 +1711,7 @@ function cmdStatus(argv: string[]): number {
       capSec: state.capSec,
       bytes,
       crop: state.crop,
+      ...(state.micName !== undefined ? { micName: state.micName } : {}),
       device: state.device,
       command: state.command,
     },
@@ -1517,28 +1721,29 @@ function cmdStatus(argv: string[]): number {
 
 // ──────────────────────────────── main ───────────────────────────────────
 
-const HELP = `pomulum ${VERSION} — agent screen recorder (macOS, engine ffmpeg)
+const HELP = `pomulum ${VERSION} - agent screen recorder (macOS, engine ffmpeg)
 
 USAGE
   pomulum screens [--json] [--no-cache]     list the screens and microphones (avfoundation)
   pomulum snap [--out F] [--screen N]       capture one native-resolution PNG frame
   pomulum record [--crop x:y:w:h] [flags]   start a recording (detached; the prompt returns immediately)
-  pomulum status                            is a recording in progress — what, where, how long?
+  pomulum status                            is a recording in progress - what, where, how long?
   pomulum stop                              stop the recording and verify it with ffprobe
   pomulum --version                         print the version
 
 RECORD FLAGS
   --crop x:y:w:h    pixel area on the capture frame of the selected screen (origin = top left);
-                    a crop that does not fit the screen is refused (exit 2), never shrunk silently
+                    a partial fit clamps and reports cropClamped: true in the JSON; a remainder
+                    under the usable floor (8 px, 16 px at half scale) is refused with exit 2
   --screen N        device index from \`screens\` (default: the first screen)
   --duration N      stop automatically after N seconds
   --max-duration N  safety limit when --duration is not set (default 1800 s; 0 = no limit)
   --out FILE        output mp4 (default ~/Desktop/pomulum-<timestamp>.mp4)
   --no-mic          record without audio
-  --half            record at half scale (about 55% smaller, VMAF ≈ 91 — softer small text)
+  --half            record at half scale (about 55% smaller, VMAF ≈ 91 - softer small text)
   --full-res        full resolution is the default since 0.2.0; kept for old
-                    commands — it overrides the half scale of --half/--small
-  --small           CRF 28 + half scale — make the file as small as possible
+                    commands - it overrides the half scale of --half/--small
+  --small           CRF 28 + half scale - make the file as small as possible
   --dry-run         print the ffmpeg command; do not run it
 
 CONVENTIONS (the contract for agents)
@@ -1547,7 +1752,7 @@ CONVENTIONS (the contract for agents)
   pid/log           /tmp/pomulum-rec.pid · /tmp/pomulum-ffmpeg.log
 
 Requirements: Node >= 22.18 (type stripping) and ffmpeg. The Screen Recording
-permission (TCC) belongs to the app that launches the capture — your
+permission (TCC) belongs to the app that launches the capture - your
 terminal or agent host; grant THAT entry in System Settings (an \`ffmpeg\`
 entry appears only when ffmpeg runs without an app wrapper).
 

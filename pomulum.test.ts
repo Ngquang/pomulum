@@ -1,4 +1,4 @@
-// pomulum.test.ts — run with `node --test pomulum.test.ts`
+// pomulum.test.ts - run with `node --test pomulum.test.ts`
 // Tests for the pure functions only (parsing, crop geometry, timestamp).
 // They do not touch ffmpeg or permissions, so they run headless at all times.
 
@@ -27,8 +27,13 @@ import {
   looksLikeOurRecorder,
   parseArgv,
   parseCropSpec,
+  parseDecimal,
   parseDeviceList,
+  parsePgrepLines,
   parsePidfile,
+  pickDefaultMic,
+  pngDims,
+  frameCaptureArgs,
   requireWritableDir,
   resolveEncodeMode,
   resolveScreenPermission,
@@ -48,7 +53,7 @@ const FIXTURES = fileURLToPath(new URL("./tests/fixtures/", import.meta.url));
 // ── parseArgv ────────────────────────────────────────────────────────────
 
 test("parseArgv: basic bool flag and value flag", () => {
-  const a = parseArgv("record", ["--crop", "1:2:3:4", "--no-mic"], {
+  const a = parseArgv(["--crop", "1:2:3:4", "--no-mic"], {
     "--crop": "value",
     "--no-mic": "bool",
   });
@@ -57,21 +62,21 @@ test("parseArgv: basic bool flag and value flag", () => {
 });
 
 test("parseArgv: an unknown flag causes a UsageError", () => {
-  assert.throws(() => parseArgv("record", ["--nonsense"], {}), UsageError);
+  assert.throws(() => parseArgv(["--nonsense"], {}), UsageError);
 });
 
 test("parseArgv: a value flag at the end without a value causes a UsageError", () => {
-  assert.throws(() => parseArgv("record", ["--crop"], { "--crop": "value" }), UsageError);
+  assert.throws(() => parseArgv(["--crop"], { "--crop": "value" }), UsageError);
 });
 
 test("parseArgv: a value flag must not swallow a following flag", () => {
   // `record --out --json` used to store "--json" as the filename and drop
-  // the bool silently — the JSON contract must not depend on flag order.
-  assert.throws(() => parseArgv("record", ["--out", "--json"], { "--out": "value" }), UsageError);
+  // the bool silently - the JSON contract must not depend on flag order.
+  assert.throws(() => parseArgv(["--out", "--json"], { "--out": "value" }), UsageError);
 });
 
 test("parseArgv: every command accepts --help", () => {
-  const a = parseArgv("screens", ["--help"], {});
+  const a = parseArgv(["--help"], {});
   assert.equal(a.bools.has("--help"), true);
 });
 
@@ -92,6 +97,35 @@ test("parseCropSpec: an incorrect format causes a UsageError", () => {
   for (const bad of ["1:2:3", "1:2:3:4:5", "a:b:c:d", "1:2:0:4", "1:2:3:0"]) {
     assert.throws(() => parseCropSpec(bad), UsageError, `must throw for ${bad}`);
   }
+});
+
+test("parseCropSpec: an empty or hex component is a UsageError, not a silent 0 or 16", () => {
+  // Number("") is 0 and Number("0x10") is 16: a typo must not become a coordinate.
+  assert.throws(() => parseCropSpec("100::800:600"), UsageError);
+  assert.throws(() => parseCropSpec("0x10:0:800:600"), UsageError);
+  assert.throws(() => parseCropSpec("100:200:800:"), UsageError);
+});
+
+// ── parseDecimal (a flag value that must be a plain decimal number) ──────
+
+test("parseDecimal: accepts whole and fractional decimal values", () => {
+  assert.equal(parseDecimal("--screen", "3"), 3);
+  assert.equal(parseDecimal("--duration", "2.5"), 2.5);
+  assert.equal(parseDecimal("--crop", "-4"), -4);
+  assert.equal(parseDecimal("--max-duration", "0"), 0);
+});
+
+test("parseDecimal: rejects empty, hex, exponent and padded values", () => {
+  // A silent 0 can select the wrong screen or remove the duration cap.
+  for (const bad of ["", "0x2", "1e3", " 1", "1 ", "abc", "+5", "1.2.3", Infinity]) {
+    assert.throws(() => parseDecimal("--screen", String(bad)), UsageError, `must throw for ${JSON.stringify(bad)}`);
+  }
+});
+
+test("parseDecimal: a value too large for a double is an argument error, not -t Infinity", () => {
+  // 309 digits parse to Infinity; the old path let ffmpeg die on it (exit 1).
+  const huge = "9".repeat(309);
+  assert.throws(() => parseDecimal("--max-duration", huge), UsageError);
 });
 
 test("clampCrop: a crop past the limit stays inside and becomes even", () => {
@@ -124,7 +158,7 @@ test("cropWasClamped: true only when the clamp moved or shrank the request", () 
 
 test("cropUnusable: the floor is on the OUTPUT, so --full-res allows more", () => {
   assert.equal(cropUnusable({ x: 0, y: 0, w: 16, h: 16 }, true), false); // 8x8 out
-  assert.equal(cropUnusable({ x: 0, y: 0, w: 14, h: 40 }, true), true); // 7 px out — a smear
+  assert.equal(cropUnusable({ x: 0, y: 0, w: 14, h: 40 }, true), true); // 7 px out - a smear
   assert.equal(cropUnusable({ x: 0, y: 0, w: 14, h: 40 }, false), false); // 14 px out is fine
   assert.equal(cropUnusable({ x: 0, y: 0, w: 8, h: 300 }, false), false);
   assert.equal(cropUnusable({ x: 0, y: 0, w: 6, h: 300 }, false), true);
@@ -160,7 +194,7 @@ test("scaledDims: the promise matches the filter that produces the frame", () =>
 });
 
 test("scaledDims: always even, so libx264 can open yuv420p", () => {  // The documented defect: 18 px half scales to 9 with `scale=iw/2`, and the
-  // encoder refuses an odd width — the file is unreadable.
+  // encoder refuses an odd width - the file is unreadable.
   assert.deepEqual(scaledDims(18, 18, true), { w: 8, h: 8 });
   assert.deepEqual(scaledDims(22, 30, true), { w: 10, h: 14 });
   assert.deepEqual(scaledDims(800, 600, true), { w: 400, h: 300 });
@@ -184,6 +218,73 @@ test("asciiTimestamp: ASCII characters only, correct format", () => {
   assert.ok(/^[\x20-\x7E]+$/.test(s), `string has a non-ASCII character: ${JSON.stringify(s)}`);
 });
 
+// ── pngDims (the PNG header answers without a child process) ─────────────
+
+/** Minimal PNG header: signature + IHDR chunk with the given dimensions. */
+function pngHeader(w: number, h: number): Buffer {
+  const b = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+  b.write("IHDR", 12, "ascii");
+  b.writeUInt32BE(w, 16);
+  b.writeUInt32BE(h, 20);
+  return b;
+}
+
+test("pngDims: reads width and height from the IHDR header", () => {
+  assert.deepEqual(pngDims(pngHeader(2816, 1762)), { w: 2816, h: 1762 });
+  assert.deepEqual(pngDims(pngHeader(800, 600)), { w: 800, h: 600 });
+});
+
+test("pngDims: a non-PNG or truncated buffer returns null", () => {
+  assert.equal(pngDims(Buffer.from("not a png at all, definitely not one")), null);
+  assert.equal(pngDims(pngHeader(2816, 1762).subarray(0, 20)), null); // cut inside IHDR
+  assert.equal(pngDims(Buffer.alloc(0)), null);
+});
+
+test("pngDims: zero dimensions return null", () => {
+  assert.equal(pngDims(pngHeader(0, 100)), null);
+  assert.equal(pngDims(pngHeader(100, 0)), null);
+});
+
+// ── pickDefaultMic (the default mic skips Continuity devices) ────────────
+
+test("pickDefaultMic: skips an iPhone or iPad that linked itself in", () => {
+  const mics = [
+    { index: 0, name: "iPhone Microphone (Continuity)" },
+    { index: 1, name: "MacBook Pro Microphone (Built-in)" },
+  ];
+  assert.equal(pickDefaultMic(mics)?.index, 1);
+});
+
+test("pickDefaultMic: falls back to the first mic when only remote ones exist; null when none", () => {
+  assert.equal(pickDefaultMic([{ index: 0, name: "iPhone Microphone" }])?.index, 0);
+  assert.equal(pickDefaultMic([]), null);
+});
+
+// ── parsePgrepLines (process-group members for a leaderless group) ───────
+
+test("parsePgrepLines: pid + command pairs, junk lines skipped", () => {
+  const raw = "  123 /opt/homebrew/bin/ffmpeg -f avfoundation -i 1\njunk\n456 caffeinate -i ffmpeg\n";
+  const members = parsePgrepLines(raw);
+  assert.equal(members.length, 2);
+  assert.equal(members[0]?.pid, 123);
+  assert.ok(members[0]?.command.includes("avfoundation"));
+});
+
+// ── frameCaptureArgs (snap and probe share one capture) ──────────────────
+
+test("frameCaptureArgs: the probe and the snap differ only by the cursor", () => {
+  const probe = frameCaptureArgs(2, "/tmp/p.png", false);
+  const snap = frameCaptureArgs(2, "/tmp/s.png", true);
+  assert.deepEqual(probe, [
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-f", "avfoundation", "-framerate", "30", "-pixel_format", "nv12",
+    "-i", "2", "-frames:v", "1", "-update", "1", "/tmp/p.png",
+  ]);
+  assert.ok(snap.includes("-capture_cursor"));
+  assert.ok(!probe.includes("-capture_cursor"));
+});
+
 // ── toolchain ────────────────────────────────────────────────────────────
 
 test("locateToolchain: finds ffmpeg/ffprobe on this machine", () => {
@@ -191,13 +292,13 @@ test("locateToolchain: finds ffmpeg/ffprobe on this machine", () => {
   assert.ok(t, "the toolchain must be found");
   assert.ok(t!.ffmpeg.endsWith("/ffmpeg"), `unexpected ffmpeg path: ${t!.ffmpeg}`);
   assert.ok(t!.ffprobe.endsWith("/ffprobe"), `unexpected ffprobe path: ${t!.ffprobe}`);
-  // Distributions differ (Apple silicon: /opt/homebrew/bin, Intel: /usr/local/bin) —
+  // Distributions differ (Apple silicon: /opt/homebrew/bin, Intel: /usr/local/bin):
   // only the resolution, not the concrete path, is part of the contract.
 });
 
-// ── parseDeviceList (M2 — fixture) ───────────────────────────────────────
+// ── parseDeviceList (M2 - fixture) ───────────────────────────────────────
 
-test("parseDeviceList: this-machine fixture — 1 screen, face camera removed, 1 microphone", () => {
+test("parseDeviceList: this-machine fixture - 1 screen, face camera removed, 1 microphone", () => {
   const raw = readFileSync(`${FIXTURES}avfoundation-mac17-5-1screen.txt`, "utf8");
   const { screens, mics } = parseDeviceList(raw);
   // The face camera must be FILTERED OUT (pitfall #3: a probe of the camera blocks).
@@ -210,7 +311,7 @@ test("parseDeviceList: this-machine fixture — 1 screen, face camera removed, 1
   assert.equal(mics[0]!.index, 0);
 });
 
-test("parseDeviceList: synthetic 2 screens + 2 microphones — audio section splits correctly", () => {
+test("parseDeviceList: synthetic 2 screens + 2 microphones - audio section splits correctly", () => {
   const raw = [
     `[AVFoundation indev @ 0x1] AVFoundation video devices:`,
     `[AVFoundation indev @ 0x1] [0] FaceTime HD Camera`,
@@ -238,9 +339,9 @@ test("parseDeviceList: garbage output gives empty lists and does not throw", () 
   assert.equal(mics.length, 0);
 });
 
-// ── buildFfmpegArgs (M4 — golden tests, port EncodeConfig.swift) ─────────
+// ── buildFfmpegArgs (M4 - golden tests, port EncodeConfig.swift) ─────────
 
-test("buildFfmpegArgs: crop + mic + duration — golden", () => {
+test("buildFfmpegArgs: crop + mic + duration - golden", () => {
   const args = buildFfmpegArgs(
     {
       videoDevice: 1,
@@ -300,7 +401,7 @@ test("buildFfmpegArgs: no mic gives -an; full screen at full resolution gives no
   ]);
 });
 
-// ── effectiveDurationCap (v0.1 — time-limit guard) ───────────────────────
+// ── effectiveDurationCap (v0.1 - time-limit guard) ───────────────────────
 
 test("effectiveDurationCap: --duration wins over every limit", () => {
   assert.equal(effectiveDurationCap(10, null), 10);
@@ -332,9 +433,16 @@ test("selectScreen: an unknown index throws a UsageError that lists the devices;
   assert.throws(() => selectScreen([], undefined), RunError);
 });
 
+test("selectScreen: an empty or hex value is a UsageError, not a silent screen 0", () => {
+  // Number("") is 0 and Number("0x2") is 2; both would select a real device.
+  assert.throws(() => selectScreen(FIXTURE_SCREENS, ""), UsageError);
+  assert.throws(() => selectScreen(FIXTURE_SCREENS, "0x2"), UsageError);
+  assert.throws(() => selectScreen(FIXTURE_SCREENS, "1.5"), UsageError);
+});
+
 test("selectScreen: zero screens names the host app, never ffmpeg (the TCC model)", () => {
   // This message is what a user sees when the grant was lost, so it must
-  // carry the correct remedy — the app that runs the capture. `check.sh`
+  // carry the correct remedy - the app that runs the capture. `check.sh`
   // scans every shipped file for the wrong phrasing; this test pins the
   // message to the one shared remedy string.
   const e = (() => {
@@ -351,7 +459,7 @@ test("selectScreen: zero screens names the host app, never ffmpeg (the TCC model
 
 // ── looksLikeOurRecorder (a stronger pid check) ──────────────────────────
 
-test("looksLikeOurRecorder: only the marked recorder matches — never a foreign avfoundation capture", () => {
+test("looksLikeOurRecorder: only the marked recorder matches - never a foreign avfoundation capture", () => {
   const ours = "/usr/bin/caffeinate -i /opt/homebrew/bin/ffmpeg -hide_banner -f avfoundation -framerate 30 -i 1:0 -c:v libx264 -metadata comment=pomulum-recording out.mp4";
   const foreignCapture = "/opt/homebrew/bin/ffmpeg -f avfoundation -i 2 -c:v libx264 out.mp4";
   const plainTranscode = "/opt/homebrew/bin/ffmpeg -i in.mov -c:v libx264 -crf 26 out.mp4";
@@ -397,6 +505,15 @@ test("parsePidfile: capSec round-trips as a positive number and nothing else", (
     const s = parsePidfile(JSON.stringify({ ...base, capSec }));
     assert.equal(s.state === "recording" && s.capSec, null, `capSec ${JSON.stringify(capSec)} must read as null`);
   }
+});
+
+test("parsePidfile: micName rides along when present and is absent otherwise", () => {
+  const base = { state: "recording", pid: 7, output: "/tmp/x.mp4", command: "ffmpeg", startedAt: "2026-10-15T10:00:00.000Z", device: { index: 1, name: "s" }, mic: 0 };
+  const withName = parsePidfile(JSON.stringify({ ...base, micName: "MacBook Microphone" }));
+  assert.equal(withName.state === "recording" && withName.micName, "MacBook Microphone");
+  // An old pidfile (written before micName existed) still parses clean.
+  const oldShape = parsePidfile(JSON.stringify(base));
+  assert.equal(oldShape.state === "recording" && oldShape.micName, undefined);
 });
 
 test("parsePidfile: corrupt JSON, an unknown shape, and a bad pid are all rejected", () => {

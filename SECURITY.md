@@ -32,8 +32,10 @@ that reaches a shell or escapes the output directory; a pidfile that makes
   `~/Library/Caches/pomulum/screen-cache.json` (the only directory pomulum
   creates). Nothing else is written.
 - **Inputs.** Device indexes, crop values and durations are parsed as
-  numbers and refused with exit 2 when they do not fit the screen or the
-  range. Output paths are used as given: do not pass an untrusted `--out`.
+  decimal numbers and refused with exit 2 when they are not (empty, hex or
+  fractional-screen values), when the crop remainder falls under the usable
+  floor, or when they are out of range. Output paths are used as given:
+  do not pass an untrusted `--out`.
 - **Network.** None. No telemetry, no update check, no download.
 - **Microphone.** On by default. Pass `--no-mic` when audio must not be
   captured. `stop` reports `hasAudio`, so the result can be checked.

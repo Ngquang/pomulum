@@ -1,5 +1,5 @@
 #!/bin/bash
-# e2e-pomulum-ts.sh — headless end-to-end test for pomulum.ts (all output
+# e2e-pomulum-ts.sh - headless end-to-end test for pomulum.ts (all output
 # goes to /tmp, the screen of the user is not touched, and the script
 # scores pass/fail by itself).
 #
@@ -7,7 +7,7 @@
 #
 # Flow: screens -> snap -> record (crop + duration 5 s) -> stop -> verify JSON.
 # Requirement: the app that launches this script (terminal or agent host)
-# holds the Screen Recording permission — TCC attribution follows the app.
+# holds the Screen Recording permission - TCC attribution follows the app.
 
 set -u
 cd "$(dirname "$0")/.."
@@ -23,7 +23,7 @@ bad()  { log "  ✗ $1"; FAIL=$((FAIL+1)); }
 
 # One run, one log: truncate so a RESULT line is never read next to the
 # failures of an earlier run (the log used to accumulate across days).
-echo "===== pomulum.ts e2e — $(date '+%Y-%m-%d %H:%M:%S') =====" > "$LOG"
+echo "===== pomulum.ts e2e - $(date '+%Y-%m-%d %H:%M:%S') =====" > "$LOG"
 
 # 1) screens --json
 log "[1] screens --json"
@@ -56,10 +56,8 @@ SRC=$?
 echo "$ST" >> "$LOG"
 if [ $SRC -eq 0 ] && echo "$ST" | grep -q '"stopped": true'; then
   ok "stop + verify artifact"
-  D=$(echo "$ST" | python3 -c 'import json,sys;print(json.load(sys.stdin)["verified"]["durationSeconds"])')
-  W=$(echo "$ST" | python3 -c 'import json,sys;print(json.load(sys.stdin)["verified"]["width"])')
-  H=$(echo "$ST" | python3 -c 'import json,sys;print(json.load(sys.stdin)["verified"]["height"])')
-  AUD=$(echo "$ST" | python3 -c 'import json,sys;print(json.load(sys.stdin)["verified"]["hasAudio"])')
+  # One python3 for the four verified fields (they share the same JSON blob).
+  read -r D W H AUD <<<"$(echo "$ST" | python3 -c 'import json,sys;j=json.load(sys.stdin)["verified"];print(j["durationSeconds"],j["width"],j["height"],j["hasAudio"])')"
   python3 -c "import sys; sys.exit(0 if 4.0 <= $D <= 6.5 else 1)" && ok "duration $D is in [4, 6.5]" || bad "duration $D is out of the band"
   [ "$W" = "1400" ] && [ "$H" = "700" ] && ok "dims crop 1400:700 at full res = ${W}×${H}" || bad "dims differ: ${W}×${H}"
   [ "$AUD" = "True" ] && ok "audio present" || bad "no audio"
@@ -95,7 +93,7 @@ assert j["cropClamped"] is False
 ' 2>>"$LOG" && ok "dry-run reports the same shape as a real record" || bad "dry-run JSON is missing fields"
 
 # 8) a crop that does not fit is refused at the boundary (exit 2), and starts
-# nothing — it used to be clamped to 2x2 and die inside the encoder.
+# nothing - it used to be clamped to 2x2 and die inside the encoder.
 log "[8] a crop outside the screen → exit 2"
 ERR8=$(node pomulum.ts record --crop 9000:9000:100:100 --out /tmp/pomulum-e2e-never.mp4 --json 2>&1 >/dev/null)
 RC8=$?

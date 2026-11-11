@@ -64,6 +64,9 @@ ffmpeg -f avfoundation -framerate 30 -capture_cursor 1 -pixel_format nv12 \
   -c:a aac -b:a 96k -movflags +faststart out.mp4
 ```
 
+(Abridged: pomulum also passes `-metadata comment=pomulum-recording`, an
+inert marker that makes the recorder recognizable in `ps`.)
+
 - Default (full res): **94.6** VMAF, ~70–105 KB/s of desktop motion → a
   2-minute demo ≈ 8–13 MB
 - `--half` keeps the old 50% scale: **91.0** VMAF, ~55% smaller; it is the
